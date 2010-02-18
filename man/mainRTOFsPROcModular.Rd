@@ -8,8 +8,7 @@
 	that can be used for further statistical analysis
 }
 \usage{
-# "outList" contains "alignedPeakList" and "alignedPeakListMetaData" fields
-outList <- mainRTOFsPROcModular(OptionsAndParametersFileName)
+mainRTOFsPROcModular(OptionsAndParametersFileName)
 }
 \arguments{
   \item{OptionsAndParametersFileName}{ -- Name of the file containing processing 
