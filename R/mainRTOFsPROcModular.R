@@ -1,0 +1,950 @@
+"mainRTOFsPROcModular" <-
+function(OptionsAndParametersFileName) {
+
+##======================================================================##
+##======================================================================##
+##									##
+##	MAIN RTOFsPROc MODULAR CODE  020210				##
+##									##
+## 	This script links and executes the functions of rTOFsPRO	## 
+##	package for signal processing of the linear TOF spectra 	##
+##	to produce aligned peak intensity matrix (and peak positions)   ##
+##	that can be used for further statistical analysis		##
+##									##
+##   >>>best used in "setup" or "tutorial" mode<<<			## 
+##   >>>  with small data sets < 50 spectra    <<<			##
+##									##
+## OUTPUT:								##
+##									##
+## alignedPeakList and alignedPeakListMetaData structures containing	## 
+## on peak intensities and positions and their uncertainties, as well	##
+## as clinical and instrumental meta-data.				##
+## "..._Test.RDat" files save auxhiliary info and data structures,	## 
+## if desired (e.g. tofResampled and peakList) -- see documentation	##
+##									##
+## INPUT:								##
+## tofList and tofListMetaData structures (can be generated from raw	##
+## e.g., using WMBrukerParser R-package -- see documentation for	## 
+## detailed description)						##
+## Signal processing parameters are read from "OptionsAndParameters"	## 
+## file, and can be edited there.					##
+##									##
+##	BLOCKS INCLUDE:							##
+##									##
+##	Set up:								##
+##		Load "OptionsAndParameters.txt" file			##
+##		Load processing libraries				##
+##									##
+##	Load Data:							##
+##		Load Data and MetaDataSet parameters			##
+##		"multiple files" Loop begins (See note 1)		##
+##									##
+##	Background Correction. Options include:				##
+##		RC (charge accumulation model)				##
+##		Analytical (Gaussian, Exponential, linear) model	##
+##		None (default)						##
+##									##
+##	Preliminary alignment. Options include:				##
+##		Global alignment (using correlation between pivot peaks)##
+##		TOF offset adjustment (from metaData)			##
+##		None							##
+##									##
+##	Downsampling and Filtering. Options include:			##
+##		Integrative downsampling (IDS) only			##
+##		IDS and Optimal Linear Filter (default)			##
+##		IDS and Nonlinear Filter				##
+##		IDS and Matched Filter					##
+##		IDS and MAV Filter					##
+##									##
+##	Pedastal removal. Options include:				##
+##		MAV of local minima 					##
+##		None (default)						##
+##									##
+##	Peak Picking. Options include:					##
+##		Trivial	(1st difference with local minim SNR, Note 2)	##
+##		W & M (Maximum Likelihood Method) (needs extra lib)	##
+##		(call commented off: lib available from wecook@wm.edu)	##
+##									##
+##	Alignment. Options include:					##
+##		Align to average spectra				##
+##		W & M global+binning (call commented off: 		##
+##		seprate lib available from wecook@wm.edu)		##	
+##									##
+#========================================================================#
+# Note 1. Due to the large size of data files, in "compression" mode     #
+# raw tofList data can be loaded and partially processed by IDS from     #
+# multiple files. The "multiple TOFs loop" includes blocks from "Load    # 
+# data" through "Downsampling and Filtering".At the end of the loop, the #
+# downsampled spectra and their meta-data are concatenated and the	 # 
+# original tofList is removed.						 #
+#========================================================================#
+# Note 2. Basic algorithm adopted from Matlab-based Cromwell toolbox.	 #	
+# (Copyright 2005.) Local minima SNR threshold and baseline-dependent	 #
+# noise model for each preliminary filtering option was added.		 #
+# developed by MD Anderson and distributed under "BSD" Mathworks license:#
+# http://bioinformatics.mdanderson.org/cromwell.html 	 		 #
+##======================================================================##
+
+############################  Set Up Block  ##############################
+
+### Set memory limit and clean up space ###
+
+	memory.limit(1800)
+	rm(list=ls())
+	gc()
+
+### Load Options and Parameters File ###
+
+	source(OptionsAndParametersFileName)
+#TOFfileDIR <- system.file("Examples", package ="rTOFsPRO") 
+	setwd(TOFfileDIR)   # working directory for IO
+
+	if (monitorMemory){
+		startMemoryUsed<-memory.size(max=FALSE)
+		print("Memory Used Before loading data")
+		print(startMemoryUsed)
+	}
+	if (averageOnly) {
+		print("Will produce average spectrum *only*: *no processing* requested")
+	}
+
+####### Load TOF spectra and metaData from multiple files (LOOP START) #######
+
+#MBT#	setwd(TOFfileDIR)  ## set working directory to load data files from, 
+			   ## and save the results (if desired, otherwise default is used)
+
+Nfiles <-length(rTofFileNames); 
+
+	if (debug){
+		Nfiles <- min(Nfiles,2); #debug: change
+	}
+if (Nfiles != length(rTofMetaFileNames)) { 
+	userError("Spectra files must have corresponding meta-data files: check <OptionsAndParameters>")
+}
+
+for (rdl in 1:Nfiles){  ## For multiple TOF data files (e.g., multiple biprocessor RobotRuns)
+			## from the same experiment (same instrumental settings)
+        rTofFileName <- rTofFileNames[rdl]  # reads from "OptionsAndParameters" file
+	rTofMetaFileName <-rTofMetaFileNames[rdl]
+	load(rTofFileName)
+	if (debug) {
+		inputSpecList<-tofList  # original tofList copy1 (for debugging global alignment)
+	}
+	load(rTofMetaFileName)
+print("---------------------------"); 
+print("Processing input data file:"); print(rTofFileName); 
+print("---------------------------");
+ 
+### Initialization ###
+
+	dataStart <- 1 + as.integer(tofListMetaData[1, "timeOfFlightData.start"]);# same for all spectra
+	sampleRate <- as.numeric(tofListMetaData[1, "instrumentSpecificSettings.timeDelta" ]);
+	if (debug) {
+		print("dataStart & sampleRate:")
+		print(c(dataStart, sampleRate))
+	}
+		Tav1 <-  min(as.integer(tofListMetaData[,"timeOfFlightData.end"]))
+	if (rdl > 1) { Tav <- min(c(Tav, Tav1))} else { Tav <- Tav1} # length of average spectrum
+	if (Tav < osS[length(osS)]) {
+		print("Baseline offset calculation range is outside of a spectrum length:"); 
+		userError("Choose osS < min(timeOfFlightData.end) in <OptionsAndParameters>")
+	}
+
+### Get information from tofList ###
+
+	spectraName <- names(tofList)
+	spectraCount <- length(spectraName)
+	Ns <- length(tofList[[1]])
+	t0 <- dataStart:(Ns + dataStart - 1) 
+ 
+### perform only for raw tof data!
+
+########################### End Set Up Block  ############################
+	if (monitorMemory){
+		memoryUsed<-memory.size(max=FALSE)
+		print("Memory Used After loading data")
+		print(memoryUsed)
+	}
+
+########################## End Load Data Block  ##########################
+
+
+#################### Preliminary Alignment Block  #########################
+
+# Call appropriate preliminary alignment procedure
+
+	if (identical(paMethod, "globalAlign")) {
+
+### Apply global alignment ###
+		
+		print("Preliminary Alignment Method: Global Align")
+		if (detect) {
+			tof <- tofList; # initialize list of bs-spectra
+			##need to subtract "rough" baseline and smooth *beforehand* to detect shifts, 
+			##but apply to "unsubtracted" spectra
+			if (rdl > 1 & exists("savl")) { ## in case of mutiple input data files
+				tof <- c(savl, tof);  ## use previous average spectrum as ref.
+				tofList <- c(savl, tofList); 
+				tofListMetaData <- rbind(tofListMetaData[1,], tofListMetaData);
+				rownames(tofListMetaData)[1] <- names(savl)
+				
+			} 
+			tof <- ExpBkgr_call(tof, bsS,osS,mCH, dataStart) # subtract rough baseline
+			for (ia in 1:spectraCount){
+				insp <- tof[[ia]]
+				smsp <- mavSmoothing(insp,2*pikw0) # smooth with MAV
+				tof[[ia]] <- as.vector(smsp)
+			} 
+		}
+		if(debug) {
+			smsp <- circShift(smsp,60) #debug-shift
+			tof[[spectraCount]] <- as.vector(smsp)#debug-shift
+			tofListMetaData[length(tofList), "timeOfFlightData.offset" ] <- 40; #debug-shift
+			print("debug global offset in the last spectrum")
+			print(tofListMetaData[length(tofList), "timeOfFlightData.offset" ])
+		}
+	aList <- globalAlign(tof, tofList, tofListMetaData, pikw0,noiseThres,startS,endS, appli, detect)
+        tofList <- aList$tList; tofListMetaData <- aList$tMeta;
+	rm(aList); gc();  ## clean up memory  
+	if (rdl > 1 & detect & exists("savl")) { ## in case of mutiple data files
+		lentl <- length(tofList); lenmd <- dim(tofListMetaData)[1]
+		tofList <- tofList[2:lentl];  ## remove previous average spectrum as ref.
+		tof <- tof[2:lentl];
+		tofListMetaData <- tofListMetaData[2:lenmd,] 
+	} 
+	rm(tof); gc(); ## clean memory
+	if (debug) {
+		print("debug global offset detection")
+		print(tofListMetaData[length(tofList), "timeOfFlightData.offset" ])
+		print(c(sum(inputSpecList[[1]]-tofList[[1]]),sum(inputSpecList[[11]]-tofList[[11]]))) #debug-shift
+	}
+
+####### End global alignment #######
+
+		} else if (identical(paMethod, "delay")) {
+
+####### Begin Offset Adjust #######
+
+		print("Preliminary Alignment Method: Time Delay Adjustment")
+	## assumes the same sampling rate for all records, but different time-zero for some
+
+	if(!exists("zero0") ) {
+		v1 <- as.numeric(tofListMetaData[,"instrumentSpecificSettings.timeZero" ])
+		zero0<- max(v1)
+	} 
+        adsp <- 0;
+	spectraName <- names(tofList)
+	spectraCount <- length(tofList)
+	if (debug) { # make a change in offset
+		tofListMetaData[spectraCount,"instrumentSpecificSettings.timeZero" ] <- zero0 - 300; #debug-shift
+	}
+	for (i in 1:spectraCount){
+		zero<- as.numeric(tofListMetaData[i,"instrumentSpecificSettings.timeZero" ])
+		if(zero!=zero0){
+			delay<-round((zero0-zero)/sampleRate);
+			adsp<-c(adsp,i);
+			if (debug) {
+				print("debug pre-set TD shift")
+				print(c(i,delay)) #debug-shift
+			}
+	   		spectrum <- tofList[[spectraName[i]]]
+			shsp <- circShift(spectrum, delay)
+			tofList[[spectraName[i]]] <- as.vector(shsp) 
+		}
+	} 
+	if (debug) {
+		print(c(sum(inputSpecList[[1]][1:10]-tofList[[1]][1:10]),sum(inputSpecList[[11]][1:10]-tofList[[11]][1:10]))) #debug-shift
+	}
+	if (length(adsp)>1){
+	adsp <- adsp[2:length(adsp)]; # spectra with applied offset adjustment 
+	print("####   Pre-adjusted spectra:")
+	print(adsp)
+	} else {
+	print("####   None of the spectra needed pre-adjustment    ####")
+	}
+	inputSpectrum <- tofList[[1]] 
+	Ns <- length(inputSpectrum)
+
+### End Offset Adjust ###
+
+		} else {
+		print("Preliminary Alignment Method: none")
+	} # end preliminary alignment options
+
+
+################## End Preliminary Alignment Block  #######################
+
+###################  Construct Average Spectrum  ########################
+
+	if (rdl == 1){
+		sav <- tofList[[1]][1:Tav];
+		Navs <- 0;
+	} else {
+		sav <- sav[1:Tav]*Navs+tofList[[1]][1:Tav];
+	}
+
+	if (debug) { 
+		print("average spectrum BEFORE update: data_set, number_sp, current_spectraCount")
+        	print(c(rdl, Navs, spectraCount)) # debug multiple input
+	}
+
+	if (spectraCount > 1){
+		for (i in 2:spectraCount) {
+    			sav <- sav+tofList[[i]][1:Tav]
+		}
+	} else { i <- 1}
+	Navs <- spectraCount + Navs;
+	sav <- sav/Navs;
+	cofsav <- mean(sav[osS]);  # constant offset for average-spectrum
+	savl <- list();
+	savl[[1]] <- sav; # make into tofList-like strcuture
+	names(savl) <- "average"
+	savbs <- savl
+	if (debug) { 
+		print("average spectrum AFTER update: data_set, number_sp, current_spectraCount")
+        	print(c(rdl, Navs, spectraCount)) # debug multiple input
+	}
+
+########################## End Construct Mean Spectrum Block  ###################
+
+if (!averageOnly){  ## Do processing of all data if not *only average* requested
+###################  Background Correction Block  ########################
+tof <- tofList # initialize bs-list
+
+# Call appropriate baseline subtraction procedure
+
+	if (identical(bsMethod, "RC")) {
+	  
+### Start RC-Background Correction ###
+
+		print("Background Subtraction Method: RC")
+	  	
+                tof <- chargeBkgr_call(tofList,osS,amp,decay);
+		savbs <- chargeBkgr_call(savl,osS,amp,decay); # baseline-subtracted average spectrum
+
+### End RC-Background Correction ###
+
+		} else if (identical(bsMethod, "Analytical")) {
+
+### Start Analytical Background Correction ###
+
+		print("Background Subtraction Method: Analytical function fit");
+		if (mCH == 1) { print("# Linear baseline model #")}
+		else if (mCH == 2) {print("# Exponential baseline model #")}
+		else {print("# Gaussian baseline model #")}
+
+	 	tof <- ExpBkgr_call(tofList, bsS,osS,mCH, dataStart)
+		savbs <- ExpBkgr_call(savl, bsS,osS,mCH, dataStart)
+		if (debug) {
+			spi11<-inputSpecList[[11]]; spb11<-tof[[11]]; spg11<-tofList[[11]] #debug-shift
+			print("debug shift: offset_input, offset_bs, offset_tofList:")
+			print(c(mean(spi11[osS]),mean(spb11[osS]),mean(spg11[osS]) )) #debug-shift
+		}
+
+### End Analytical-Background Correction ###
+
+		} else if (identical(bsMethod, "ADCoffset")) {
+		print("Background Subtraction Method: ADC offset");
+ 		tof <- offsetBkgr_call(tofList, osS)
+		savbs <- offsetBkgr_call(savl, osS)
+		} else { # no BS-subtraction
+
+		print("Background Subtraction Method/Default: none")
+		
+	} # end baseline subtraction options
+
+	bsav <- savl[[1]]-savbs[[1]]; #baseline of average spectrum
+
+################## End Background Correction Block  ######################
+
+#################### Downsampling/Filtering Block  #########################
+
+	### MZ axis calculation ###
+	if (useMeta) { # use instrumental meta-data for calibration
+		tms <- (as.numeric(tofListMetaData[1,"param.T0"])+(t0-1)*as.numeric(tofListMetaData[1,"param.TDelta"]))/as.numeric(tofListMetaData[1,"param.U"])
+		masst <- as.numeric(tofListMetaData[1,"param.c1"])*tms*tms+ as.numeric(tofListMetaData[1,"param.c0"])*tms+as.numeric(tofListMetaData[1,"param.c2"]);
+	} else {
+		tms <- (nDelay+(t0-1)*as.numeric(tofListMetaData[1,"param.TDelta"]))/as.numeric(tofListMetaData[1,"param.U"])
+		masst <- A*tms*tms+ B*tms + C;
+	}
+	trnct <- 2.0^(instrPrc+1) # signal wavelet truncation number
+
+	## pikw0,lasym0 - original input peak shape parameters from file
+
+	pfit <- as.vector(c(p1,p2,p3))
+	minHW <- mpikw; # for now, hard code minimum sufficient peakHW (point density),same scale as "pikw"
+
+	## down-sample average spectrum
+		msrec <- savbs[[1]]
+		cOffset<-mean(msrec[(length(msrec)-2000):(length(msrec)-100)]);# PAR: Need to make parameters
+		msrec<-msrec-cOffset;
+		rsavout<-msResample(msrec,t0, masst, pikw0, lasym0, pfit, minHW, Gnoise);
+		pikw<-rsavout$resPikw; fHW0 <- ceiling(pikw)+1; ## IDS/MAV signal HW
+		lasym<-rsavout$resAsym; nsk <- ceiling(lasym); fHW <- fHW0; iir <- rsavout$resTime;
+		rsav <- rsavout$resSignal; 
+		nsav <- noiseEstmtr2(rsav)
+		fwl <- 0; # initial filter length
+		namavl <- savbs; namavl[[1]]<- (bsav[iir]-cofsav)*nsav;
+		fsavl <- savbs; 
+
+	### Calculate appropriate filter coefficients,length and filtered HW #####
+	### filter average spectrum and record its filter noise amplitude "namavl"
+
+	if ( identical(algo, "none") ){  ## added processing for "rsav"
+		print("Filter: none")
+		fsavl[[1]] <- rsav
+		##noise amplitude threshold for down-sampled signal
+    		if (nsdepBS) { #noise dependent on baseline: Poisson distribution
+    			namavl[[1]] <- (sqrt(abs(bsav[iir]-cofsav)*nsav)+nsav)*3; # noise amplitude
+                } else { # stationary noise (independent of baseline)
+    			namavl[[1]]<-(rsav*0+nsav)*3;  # noise amplitude  
+    		}
+		fwl <- 0; # filter length
+		fHW <- fHW;
+	} else if (identical(algo, "optimalLinear")) {
+		print("Filter: Optimal Linear")
+		if (identical(wavelet, "LL")) {
+			print("Wavelet Shape: Lorentzian")
+			wof <- coefOptFiltLL(fHW, nsk, trnct);
+			filtSig <- optFilt(rsav, wof);
+			fsavl[[1]] <- circShift(filtSig, 1); # correction of extra LL-filter phase shift
+		} else if (identical(wavelet, "GG")) {
+			print("Wavelet Shape: Gaussian")
+			wof <- coefOptFiltGG(fHW, nsk, trnct);
+			filtSig <- optFilt(rsav, wof);
+			fsavl[[1]] <- circShift(filtSig, 1); # correction of extra GG-filter phase shift
+		} else if (identical(wavelet, "GL")) {
+			print("Wavelet Shape: lhalf-Gaussian-rhalf-Lorentzian")
+			wof <- coefOptFiltGL(fHW, nsk, trnct);
+			filtSig <- optFilt(rsav, wof);
+			fsavl[[1]] <- circShift(filtSig, 1); # correction
+		} else { print("No wavelet function was selected: using <GG> as default")
+			wavelet <- "GG" # default
+			wof <- coefOptFiltGG(fHW, nsk, trnct);
+			filtSig <- optFilt(rsav, wof);
+			fsavl[[1]] <- circShift(filtSig, 1); # correction of extra GG-filter phase shift
+		}
+
+    		fsavl[[1]][length(fsavl[[1]])] <- 0; # end-point correction 
+    		## noise amplitude threshold for OLF
+		if (nsdepBS) { #noise dependent on baseline: Poisson distribution
+    			namavl[[1]]<-(sqrt(abs(bsav[iir]-cofsav)*nsav)+nsav)*3*(max(fsavl[[1]])/max(rsav))/3.5; # noise amplitude
+                } else { # stationary noise (independent of baseline)
+    			namavl[[1]]<-(rsav*0+nsav)*3*(max(fsavl[[1]])/max(rsav))/3.5;    # noise amplitude  
+    		} 
+		fwl <- length(wof); # filter length
+		fHW <- 0.9*fHW; # updated filtered HW
+	} else if (identical(algo, "matched")) {
+		print("Filter: Matched")
+		if (identical(wavelet, "LL")) {
+			print("Wavelet Shape: Lorentzian")
+			mfc <- matchFiltCoefLL(fHW, nsk, trnct)
+			filtSig <- matchedFilter(rsav, mfc);
+			fsavl[[1]] <- filtSig
+		} else if (identical(wavelet, "GG")) {
+			print("Wavelet Shape: Gaussian")
+			mfc <- matchFiltCoefGG(fHW, nsk, trnct)
+			filtSig <- matchedFilter(rsav, mfc);
+			fsavl[[1]] <- circShift(filtSig, 1); # correction of extra GG-filter phase shift
+		} else if (identical(wavelet, "GL")) {
+			print("Wavelet Shape: lhalf-Gaussian-rhalf-Lorentzian")
+			mfc <- matchFiltCoefGL(fHW, nsk, trnct)
+			fsavl[[1]] <- matchedFilter(rsav, mfc);
+		} else { print("No wavelet function was selected: using <GG> as default")
+			wavelet <- "GG" # default
+			mfc <- matchFiltCoefGG(fHW, nsk, trnct)
+			filtSig <- matchedFilter(rsav, mfc);
+			fsavl[[1]] <- circShift(filtSig, 1); # correction of extra GG-filter phase shift
+		}
+    		## noise amplitude threshold for matched
+		if (nsdepBS) { #noise dependent on baseline: Poisson distribution
+    			namavl[[1]]<-(sqrt(abs(bsav[iir]-cofsav)*nsav)+nsav)*0.5*(max(fsavl[[1]])/max(rsav)); # noise amplitude
+                } else { # stationary noise (independent of baseline)
+    			namavl[[1]]<-(rsav*0+nsav)*0.5*(max(fsavl[[1]])/max(rsav));    # noise amplitude  
+    		} 
+		fwl <- length(mfc); # filter length
+		fHW <- 1.4*fHW; # updated filtered HW
+	} else if (identical(algo, "nonLinear")) {
+		print("Filter: Nonlinear")
+		if (identical(wavelet, "LL")) {
+			print("Wavelet Shape: Lorentzian")
+			coef3list <- coefNLFiltLL(fHW, nsk, trnct);
+			filtSig <- geomavFilt(rsav, trnct, coef3list);
+			fsavl[[1]] <- filtSig
+		} else if (identical(wavelet, "GG")) {
+			print("Wavelet Shape: Gaussian")
+			coef3list <- coefNLFiltGG(fHW, nsk, trnct);
+			filtSig <- geomavFilt(rsav, trnct, coef3list);
+			fsavl[[1]] <- circShift(filtSig, 1); # correction of extra GG-filter phase shift
+		} else if (identical(wavelet, "GL")) {
+			print("Wavelet Shape: lhalf-Gaussian-rhalf-Lorentzian")
+			coef3list <- coefNLFiltGL(fHW, nsk, trnct);
+			fsavl[[1]] <- geomavFilt(rsav, trnct, coef3list);
+		} else { print("No wavelet function was selected: using <GG> as default")
+			wavelet <- "GG" # default
+			coef3list <- coefNLFiltGG(fHW, nsk, trnct);
+			filtSig <- geomavFilt(rsav, trnct, coef3list);
+			fsavl[[1]] <- circShift(filtSig, 1); # correction of extra GG-filter phase shift
+		}
+    		## noise amplitude threshold for nonlinear
+		if (nsdepBS) { #noise dependent on baseline: Poisson distribution
+    			namavl[[1]]<-(sqrt(abs(bsav[iir]-cofsav)*nsav)+nsav)*1.5*(max(fsavl[[1]])/max(rsav)); # noise amplitude
+                } else { # stationary noise (independent of baseline)
+    			namavl[[1]]<-(rsav*0+nsav)*1.5*(max(fsavl[[1]])/max(rsav));    # noise amplitude  
+    		} 
+		wfc1 <- coef3list$fc1; wfc2 <- coef3list$fc2; wfc3 <- coef3list$fc3;
+		fwl <- max(c(length(wfc1),length(wfc2),length(wfc3))); # filter length
+		fHW <- 0.6*fHW; # updated filtered HW
+	} else if (identical(algo, "MAV")) {
+		print("Filter: MAV")
+		fsavl[[1]]<- mavSmoothing(rsav, fHW0);
+		## noise amplitude threshold for MAV
+		if (nsdepBS) { #noise dependent on baseline: Poisson distribution
+    			namavl[[1]] <- (sqrt(abs(bsav[iir]-cofsav)*nsav)+nsav)*3*(max(fsavl[[1]])/max(rsav))/sqrt(fHW0); # noise amplitude
+                } else { # stationary noise (independent of baseline)
+    			namavl[[1]] <- (rsav*0+nsav)*3*(max(fsavl[[1]])/max(rsav))/sqrt(fHW0);  # noise amplitude   
+    		}
+		fwl <- fHW0; # filter length
+		#fHW <- 1.1*fHW; # ??updated filtered HW
+	} else {
+		print("NO Filter specified: using OLF with Gaussian wavelet as Default")
+		wof <- coefOptFiltGG(fHW, nsk, trnct);
+		filtSig <- optFilt(rsav, wof);
+		fsavl[[1]] <- circShift(filtSig, 1); # correction of extra GG-filter phase shift
+		fsavl[[1]][length(fsavl[[1]])] <- 0; # end-point correction 
+    		## noise amplitude threshold for OLF
+		if (nsdepBS) { #noise dependent on baseline: Poisson distribution
+    			namavl[[1]]<-(sqrt(abs(bsav[iir]-cofsav)*nsav)+nsav)*3*(max(fsavl[[1]])/max(rsav))/3.5; # noise amplitude
+                } else { # stationary noise (independent of baseline)
+    			namavl[[1]]<-(rsav*0+nsav)*3*(max(fsavl[[1]])/max(rsav))/3.5;    # noise amplitude  
+    		} 
+		fwl <- length(wof); # filter length
+		fHW <- 0.9*fHW; # updated filtered HW
+	} ### end filter and wavelet options and average spectrum processing
+
+      
+	tofResampled <- tofList; naml <- tofList;  ## intitialize resampled and noise amplitude lists
+
+	for (k in 1:spectraCount){  ## loop through baseline-subtracted spectra
+
+		inputSpectrum <- tof[[k]] # baseline-subtracted
+		msrec <- inputSpectrum
+
+		## subtract extra constant baseline
+		cOffset<-mean(msrec[(length(msrec)-2000):(length(msrec)-100)]);# PAR: Need to make parameters
+		msrec<-msrec-cOffset;
+
+	### Down-sample each spectrum
+		rsout<-msResample(msrec,t0, masst, pikw0, lasym0, pfit, minHW, Gnoise);
+		#pikw<-rsout$resPikw; fHW <- ceiling(pikw)+1; ## IDS signal HW
+		#lasym<-rsout$resAsym; iir <- rsout$resTime; ## already assigned from average above
+		srs <- rsout$resSignal; 
+		
+		ns <- noiseEstmtr2(rsout$resSignal) # STD of noise for this spectrum
+		nam <- (srs*0+ns)*3;  # initialize noise amplitude 
+		mbs <- tofList[[k]]-tof[[k]]; # spectrum baseline
+
+	## call appropriate filter
+		if ( identical(algo, "none") ){
+			   filtSig <- srs;
+			   ##noise amplitude threshold for down-sampled signal
+    			   if (nsdepBS) { #noise dependent on baseline: Poisson distribution
+			   	cof <- mean(tofList[[k]][osS]) 
+    			   	nam <- (sqrt(abs(mbs[iir]-cof)*ns)+ns)*3; # noise amplitude
+                           } else { # stationary noise (independent of baseline)
+    			     	nam<-(filtSig*0+ns)*3;  # noise amplitude  
+    			   }
+ 		}  else if (identical(algo, "matched")) {
+			   filtSig <- matchedFilter(srs, mfc);
+			   if (identical(wavelet, "GG")) {
+        			filtSig <- circShift(filtSig, 1); # correction of extra GG-filter phase shift
+    			   } ## noise amplitude threshold for matched filter
+			   if (nsdepBS) { #noise dependent on baseline for "matched"
+			   	cof <- mean(tofList[[k]][osS]) 
+    			   	nam <- (sqrt(abs(mbs[iir]-cof)*ns)+ns)*0.5*max(filtSig)/max(srs); # noise amplitude
+                           } else { # stationary noise (independent of baseline)
+    			     	nam <- (srs*0+ns)*0.5*max(filtSig)/max(srs);  # noise amplitude   
+    			   }
+
+		} else if (identical(algo, "nonLinear")) {
+			   filtSig <- geomavFilt(srs, trnct, coef3list);
+			   if (identical(wavelet, "GG")) {
+        			filtSig <- circShift(filtSig, 1); # correction of extra GG-filter phase shift
+    			   }
+    			   ## noise amplitude threshold for non-linear filter
+			   if (nsdepBS) { #noise dependent on baseline for "nonlinear": Poisson distribution
+			   	cof <- mean(tofList[[k]][osS]) 
+    			   	nam<-(sqrt(abs(mbs[iir]-cof)*ns)+ns)*1.5*max(filtSig)/max(srs); # noise amplitude
+                           } else { # stationary noise (independent of baseline)
+    			     	nam<-(srs*0+ns)*1.5*(max(filtSig)/max(srs));    # noise amplitude  
+    			   }
+  
+		} else if (identical(algo, "MAV")) {
+			   filtSig <- mavSmoothing(rsout$resSignal, fHW0);
+			   ## noise amplitude threshold for MAV
+			   if (nsdepBS) { #noise dependent on baseline: Poisson distribution
+			   	cof <- mean(tofList[[k]][osS]) 
+    			   	nam <- (sqrt(abs(mbs[iir]-cof)*ns)+ns)*3*(max(filtSig)/max(srs))/sqrt(fHW); # noise amplitude
+                           } else { # stationary noise (independent of baseline)
+    			     	nam <- (srs*0+ns)*3*(max(filtSig)/max(srs))/sqrt(fHW);  # noise amplitude   
+    			   }
+
+		} else {  ## We use OLF as default (if no filter option specified)
+			   filtSig <- optFilt(srs, wof);
+        		   filtSig<- circShift(filtSig, 1); # correction of phase shift	
+    			   filtSig[length(filtSig)] <- 0; # end-point correction 
+    			   ## noise amplitude threshold for OLF
+			   if (nsdepBS) { #noise dependent on baseline: Poisson distribution
+			   	cof <- mean(tofList[[k]][osS]) 
+    			   	nam<-(sqrt(abs(mbs[iir]-cof)*ns)+ns)*3*(max(filtSig)/max(srs))/3.5; # noise amplitude
+                           } else { # stationary noise (independent of baseline)
+    			     	nam<-(srs*0+ns)*3*(max(filtSig)/max(srs))/3.5;    # noise amplitude  
+    			   } 
+		}
+
+		tofResampled[[k]] <- filtSig; naml[[k]] <- nam;
+
+	## The following 4 lines interpolate back to the original time sequence
+	## and update tofList
+		if (backIntr){
+		intrp<-approx(rsout$resTime,filtSig,t0);
+		outSpectrum <-as.vector(intrp$y);
+		outSpectrum[is.na(outSpectrum)] <- msrec[is.na(outSpectrum)]
+		tofList[[k]] <- outSpectrum
+		}
+
+	} ## End of spectrum loop
+fHW <- ceiling(fHW); # make integer
+rm(filtSig, mbs, nam,srs, ns,iir, msrec, inputSpectrum, rsav, nsav); gc();
+
+################## End Resampling/Filtering Block  #######################
+
+	## update master lists for data compression (multiple input files) mode
+	if (rdl == 1){
+		masterRTOFl <- tofResampled
+		masterMeta <- tofListMetaData
+		masterNaml <- naml
+	} else {
+		masterRTOFl <- c(masterRTOFl, tofResampled);
+		masterMeta <- rbind(masterMeta, tofListMetaData)
+		masterNaml <- c(masterNaml, naml);
+	}
+
+	if (monitorMemory){
+		memoryUsedBeforeCleanUp<-memory.size(max=FALSE)
+		print("Memory Used Before cleaning up data")
+		print(memoryUsedBeforeCleanUp)
+	}
+
+	## remove large tofList data from memory
+	rm(tofList, tofResampled, tof, naml) ## 
+	if (debug) { rm(inputSpecList) }
+	gc()
+	if (monitorMemory){
+		memoryUsedAfterCleanUp<-memory.size(max=FALSE)
+		print("Memory Used After cleaning up data")
+		print(memoryUsedAfterCleanUp)
+	}
+    } ## end (not average only) -- all spectra processing
+} ## end data reduction for raw TOF data
+
+####### END LOOP: Load TOF spectra and metaData from multiple files and compress #######
+
+if(! averageOnly) { ## do the whole set processing if *not* only average requested
+## Final (compressed) data structures for all input files (concatinated): 
+tofResampled <- masterRTOFl; 
+tofListMetaData <- masterMeta;
+naml <- masterNaml;
+spectraName <- names(tofResampled)  # spectra names for all data
+spectraCount <- length(spectraName)  # all spectra from multiple files
+
+rm(masterNaml, masterRTOFl, masterMeta, sav); gc(); # clean-up memory from "master"-lists
+
+	if (debug) { 
+		print("after multiple loads: length(tofResampled), spectraCounts:")
+		print(c(length(tofResampled), spectraCount))
+	}
+
+	if (saveOut){
+		save(tofResampled,file="tofResampled_Test.Rdat")
+		save(tofListMetaData,file="tofListMeta_Test.Rdat")
+	}
+
+#####################  Pedestal Removal Block  ###########################
+
+# Call appropriate pedestal removal procedure
+
+	if (identical(prMethod, "lmMAV")) {
+
+### Start local minima MAV for Pedestal Removal ###
+
+		print("Pedestal Removal Method: local minima MAV")
+
+		tofResampled<-pedRmMAV_call(tofResampled,fHW,nf)
+		fsavl <- pedRmMAV_call(fsavl,fHW,nf) # remove pedestal in average spectrum
+
+### End Moving Average Filter for Pedestal Removal ###
+
+		}  else  {
+		print("Pedestal Removal Method: none")
+		
+	} # end pedestal removal options
+
+	if (saveOut) {
+		save(tofResampled,file="tofResampledPR_Test.Rdat")
+		save(savl, savbs, file = "sav_bs_Test.Rdat")
+		rm(savl, savbs); gc();
+	}
+
+#################### End Pedastal Removal Block  #########################
+
+#######################  Peak Detection Block  ###########################
+
+if (nsdepBS) { print("# Baseline-dependent noise threshold used for peak detection #")
+} else { print("# Constant noise threshold used for peak detection #")}
+
+
+# Call appropriate peak picking procedure
+
+	if  (identical(ppMethod, "Trivial")) {
+
+
+### Start Trivial Peak Picker Block ###
+
+		print("Peak Picking Method: Trivial")
+		peakLav <- trivPP_call(fsavl, snr, namavl, fHW, fwl, startPP, dataStart)
+		if (identical(alMethod, "AlignToAverage") & noPL) {
+		peakL <- peakLav
+		} else {
+		peakL <- trivPP_call(tofResampled, snr, naml, fHW, fwl, startPP, dataStart)
+		}
+
+### END Trivial Peak Picker block ###
+
+	} else if (identical(ppMethod, "WM")) {
+
+### Start W&M Peak Picker Block ###
+
+		print("Peak Picking Method: WM")
+
+	## This assumes data is in TOF, explanation: 
+	## tBegin <- tStartIn*sampleRate
+	## tStop <- tEndIn*sampleRate
+	## rsout$resTime[5800] = time index that was mapped to 5800
+	## newStart <- rsout$resTime[min(which(rsout$resTime>tStartIn))]
+
+		tBegin <- min(which(rsout$resTime>tStart))
+		tStop <- max(which(rsout$resTime<tEnd))	
+#		tBegin <- min(which(rsout$resTime>tStartIn))
+#	 	tStop <- length(tofResampled[[1]])
+#		tStop <- 3000
+		threshold <- snr # use the same as for other detection methods
+#		Control <- list()
+#		kGroup<- 1
+#		Control[[1]] <- list(labGroup="labGroup",include = TRUE, width=width,sNR=threshold,sampleRate=1,offset=0,slope=1,tof=tofList)
+
+	 	width<-fHW # where pikw<-rsout$resPikw
+#	  	sampleRate <- Control[[kGroup]]$sampleRate
+#	  	width <- sampleRate*Control[[kGroup]]$width
+
+#		peakL<-PP_call(tofResampled,base,width,threshold,tBegin,tStop,Noise,NoiseModel,bGetArrays,dataStart)
+
+	### END W&M Peak Picker Block ###
+
+	} else  {
+		print("Peak Picking Method: none")
+	} # end peak picking options
+
+### If peak picking is not performed, processing is terminated
+
+	if (debug & exists("peakL")){
+		print("After peak detection: length(peakL), spectraCount, noPL")
+		print(c(length(peakL),spectraCount, noPL))
+	}
+
+if (exists("peakL") & length(peakL)==spectraCount) {
+
+	##### Update peakList in original time and peakListMetaData ###
+
+	peakList<-list()
+	length(peakList) <- spectraCount
+	names(peakList) <- names(peakL)
+	
+	## Generated abbreviated peakListMetaData if it doesn't exist
+	if(!exists("peakListMetaData")){peakListMetaData<-plMeta(tofListMetaData)}
+	
+	## re-Set default offset and scale parameters in metaData, if needed
+		#peakListMetaData[ , "peakData.offset" ] <- 0
+		#peakListMetaData[ , "peakData.scale" ] <- 1
+	
+	if (identical(ppMethod, "WM")) { ## NOTE: peak list will be in original time
+		peakList <- peakL$peakList
+	### Correct peakTimes 	  
+		## To interpolate the peakList "time" values fro W&M peak picker 
+		##(which allows non-integer position)
+		## rsout$resTime is an vector where rsout$resTime[5000] = time index 
+		## that was mapped to 5000
+		## so peakValue=5000, true peakTime is rsout$resTime[peakValue]
+		## so peakValue=5000.4, true peakTime is:
+	# rsout$resTime[as.integer(peakValue)] + 0.4*rsout$resTime[as.integer(peakValue+1)]
+		for (k in 1:spectraCount) {  ## correct original-time positions
+			peakData <- peakList[[k]];
+			peakIndex <- as.integer(peakData$Positions)
+			peakDiff <- peakData$Positions - peakIndex
+			peakDelta <- rsout$resTime[1+peakIndex]-rsout$resTime[peakIndex]
+			peakData$Positions <- rsout$resTime[peakIndex] + peakDiff*peakDelta
+			peakList[[k]] <- peakData;
+			rm(peakData, peakIndex, peakDiff, peakDelta)
+		}
+	} else {
+		peakList <- peakL
+	}
+
+	rm(peakL); gc(); # clean-up memory
+	### End Update peakList in original and PeakListMetaData ###
+
+	if (saveOut) {
+		save(peakList,file="peakList_Test.Rdat")
+		save(peakListMetaData,file="peakListMeta_Test.Rdat")
+	}
+
+}  ## end if peakList detection was performed
+###################### End Peak Picking Block  ###########################
+
+#######################  alignment Block  #############################
+
+	alignedPeakListMetaData<-aplMeta(tofListMetaData)
+
+# Call appropriate alignment procedure
+
+	if (identical(alMethod, "AlignToAverage")) {
+
+### Start Align to Average Spectra ###
+
+		print("Alignment Method: Align to Average")
+
+		if (align2Training) {   # align to the peak list determined from training
+
+		# provide DOWN-SAMPLED aligned peak list (aplTrain) file for training data
+		# NOTE: choose "DS" domain to generate and save when training
+			load(aplTrainFileName) # .Rdat file name containing "aplTrain" object
+
+			if (debug & exists("aplTrain")){
+				print("training aligned peaks loaded:")
+				print(aplTrain$peaks)
+			}
+			peaksav<-aplTrain$peaks # peak positions from training	
+                } else {
+			peaksav<-peakLav[[1]]$Positions # peak positions from average spectrum
+		}
+
+		if (debug & exists("peaksav")){
+			print("average spectrum peak positions used for alignment:")
+			print(peaksav)
+		}
+		
+	alignedPeakList<- peakAlignAv(peaksav,tofResampled,naml,fHW) 
+#	alignedPeakList<-peakAlignAv(peaksav,tofList,naml,fHW)
+
+
+### END Align to Average Spectra ###
+
+		}  else if (identical(alMethod, "WM")) {
+
+### START W & M Aligner ###
+### Note: requires peakList
+
+		print("Alignment Method: WM")
+		print("Requires preliminary peakList detection for all spectra")
+	width <- fHW
+	if (!exists("windmin")) windmin <- min(3*width,maxShift) ## Smallest window to use for binning
+	if (!exists("windmax")) windmax <- min(8*width,maxShift) ## Starting window size
+	if (exists("peakList") & length(peakList)==spectraCount) {
+#		results3 <- AlignWM_call(tofResampled,t0,peakList,peakListMetaData,alignFraction,windmin,windmax,detectFraction,ShiftYes,SlopeYes)
+#		alignedPeakList <- results3$alignedPeakList
+#		alignedpeakListMetaData <-results3$alignedPeakListMetaData
+#		rm(results3); gc();
+	} else { print("ERROR: peakList is missing: no alignment could be performed")}
+
+### END W & M Aligner ###
+
+		} else  {
+		print("Alignment Method: none")
+		
+	} # end alignment options
+	if (debug & exists("alignedPeakList")){
+		print("after alignment: length of aligned peak list:")
+		print(length(alignedPeakList$data))
+	}
+## scale peak signals back to "integrated" intensities for Gaussian noise 07/01/09
+if (exists("alignedPeakList")){
+	if (Gnoise == 1) { # Gaussian noise (sqrt-scaled IDS spectra)
+		rrr <- rsavout$resRate
+		pks <- alignedPeakList$peaks # in IDS domain
+    		for (jd in 1:spectraCount) {
+			dmp <- alignedPeakList$data[[jd]]$Intensities;
+        		dmp <- dmp*sqrt(rrr[pks]); # square root of down-sampling window
+			alignedPeakList$data[[jd]]$Intensities <- as.vector(dmp);
+    		}
+	}
+	rm(rrr,pks,dmp); gc();
+## Convert aligned peak positions to original time
+	if (debug){
+		print("aligned peaks:")
+		print(alignedPeakList$peaks)
+	}
+
+#### Check domain (revise -- interpolate if using WM-alignment)
+	peaksRS <- as.numeric(alignedPeakList$peaks)
+	peaksOT <- rsavout$resTime[peaksRS]
+	peaksMZ <- masst[peaksOT]
+	pks3d <- cbind(peaksRS, peaksOT, peaksMZ);
+	avspr1 <- fsavl[[1]];
+
+	if (identical(alPeakDomain, "DS")) {
+		dmn <- rep("down-sampled-TOF", spectraCount)
+		alignedPeakListMetaData[,"alignedPeakData.domain"] <- dmn
+
+	} else if (identical(alPeakDomain, "MZ")) {
+		alignedPeakList$peaks<-peaksMZ
+		dmn <- rep("mass-to-charge", spectraCount)
+		alignedPeakListMetaData[,"alignedPeakData.domain"] <- dmn
+	} else {
+		alignedPeakList$peaks<-peaksOT
+		dmn <- rep("original-TOF", spectraCount)
+		alignedPeakListMetaData[,"alignedPeakData.domain"] <- dmn
+	}
+	print("---------------------------"); 
+	print("---------------------------"); 
+
+	if (saveOut) {
+		save(alignedPeakList,file="alignedPeakList_Test.Rdat")
+		save(alignedPeakListMetaData,file="alignedPeakListMeta_Test.Rdat")
+		save(avspr1, rsavout, pks3d, tms, masst, t0, file = "avSpec_peaks3d_tms_mz_Test.Rdat")
+		print("saved ..._Test.Rdat files")
+		rm(fsavl, rsavout, pks3d, tms, masst, t0); gc();
+	}
+	if (save4Mlb) { #output for MatLab if desired 
+		if (exists("tofResampled")){ 
+		OutputForML(tofResampled, "TRS") 
+		}
+		if (exists("peakList")){ 
+		OutputForML(peakList, "PL") 
+		}
+		if (exists("alignedPeakList")){ 
+		OutputForML(alignedPeakList, "APL") 
+		}
+		if (exists("inputSpecList")){ # placeholder for "debug"-spectra
+		OutputForML(peakList, "ISP") 
+		}
+		
+	}
+	rm(peaksRS, peaksOT, peaksMZ, avspr1, i, jd, k, rsout, nsk); gc();
+  } ## end (only average) check block
+}
+
+#######################  End Alignment Block  #############################
+
+return(list(alignedPeakList=alignedPeakList, alignedPeakListMetaData= alignedPeakListMetaData ))  # end of main function
+}
+

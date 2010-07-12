@@ -1,0 +1,1007 @@
+########## Empiric measurement of STD for Gaussian peak #################
+hwfmGausPeak <- function(nf,n_mu){
+###---------------------------------------------------------
+###   Output is a standard deviation (HWFM) for a peak 
+### assuming normal distribution fit.
+###   SIGMA <- hwfmGausPeak(NF,N_MU) Returns standard
+###   deviation SIGMA for a peak at the position N_MU according 
+###   to normal pdf with mean, N_MU, for the values in NF.
+###   NF is a column vector of signal values
+###   For assymetric signals, SIGMA is the left half width. 
+###------------------------------------------------------------
+
+
+fmax<-nf[n_mu];
+fhalf<-0.5*fmax;
+lhalf<-1;
+sigma <- -1;
+#print(n_mu)
+#print(length(nf))
+if ((length(nf)>0) & (n_mu>lhalf)){
+while ((n_mu-lhalf >1) & (nf[n_mu-lhalf] > fhalf)) {
+  lhalf<-lhalf+1;
+#print(n_mu-lhalf)
+}
+#lhalf
+if ((n_mu-lhalf>=1) & (nf[n_mu-lhalf]<=fhalf)){
+ 
+  sigma<-lhalf #/sqrt(2*log(2)); # without Gaussian N-factor, sigma in time-clicks
+}
+else {
+  #disp('Could not find half maximum: input array is too narrow');
+  #disp('at the peak'); n_mu
+  sigma <- -1;
+} 
+}
+return(sigma)
+} ##### END "hwfmGausPeak" #####
+
+
+########## Pivot peak detection by first difference #################
+pivpeak <- function(sigt, thres) {
+
+###----------------------------------------------------
+### Find time position of the pivot peaks above threshold 
+### input signal
+###
+### INPUT:
+### sigt - observed sampled discrete signal;
+### thres - intensity threshold for pivot peaks;
+###
+### OUTPUT:
+### pivots - time point numbers for pivots;
+###
+
+qin<-1:length(sigt);
+k<-qin[sigt>thres];
+x<-diff(sigt[k],1,1)
+xl<-x[1:length(x)-1]
+xr<-x[2:length(x)]
+p<-2:length(k)-1;
+p1<-p[(xl>0 & xr<=0) | (xl==0 & xr<0)]
+pivots<-k[p1]
+
+return(as.vector(pivots))
+
+} ##### END "pivpeak" #####
+
+########## Empirical HWHM measurement #################
+peakWidth <- function(s,startsd, nsubdiv, sfr){
+###------------------------------------------ 
+### OUTPUT:
+###
+### imxs - point of the maximum, and estimated width (two columns);
+###
+### INPUT:
+### s - signal equally sampled in time;
+### startsd - starting point for subdivision;
+### nsubdiv - number of subdivisions for peak width estimate;
+### sfr - signal fraction (1/sfr) of maximum to include
+###-----------------------------------------------  
+
+Nr <- length(s);
+Nc <- ncol(s);
+tolrnc <- 0.001
+drange_thr  <- sfr #20; ## 1/fraction of maximum signal to include in fit
+
+#source("pivpeak.R");
+#source("hwfmGausPeak.R");
+
+psdiv <- floor((Nr-startsd)/nsubdiv);
+#print(psdiv); # debug
+mxs <- 0; sgmmxs <- 0;
+for (k in 1:(nsubdiv-1)){
+#startsd+1+(k-1)*psdiv
+#startsd+k*psdiv
+ss <- s[(startsd+1+(k-1)*psdiv):(startsd+k*psdiv)];
+subpoint <- 1:length(ss)
+subpeaks <- pivpeak(ss,tolrnc)
+#print(k)
+mx <- max(ss[subpeaks])
+imx <- intersect(subpoint[ss==mx], subpeaks);
+if (length(imx)>1){
+imx<-imx[length(imx)]
+}
+pointmx <-imx+startsd+1+(k-1)*psdiv;
+pstart <- pointmx-psdiv; pend <- pointmx+psdiv;
+
+sgm <-0;
+if ((pstart >=1) & (pend <= length(s)-1)){ 
+sgm <- hwfmGausPeak(s[pstart:pend], psdiv+1);
+}
+if ((sgm > 0) & (!is.element(pointmx, mxs))){
+  mxs <- c(mxs,pointmx);
+sgmmxs <- c(sgmmxs,sgm);
+}
+}
+
+mxs <- mxs[2:length(mxs)]; sgmmxs <- sgmmxs[2:length(sgmmxs)];
+
+imxs<- cbind(matrix(mxs, ncol=1),matrix(sgmmxs, ncol=1));
+
+mmx <- max(s[imxs[,1]]);
+immx <- which(s[imxs[,1]]==mmx);
+
+## look only for high signals
+
+r1 <- imxs[,1]-imxs[,2]; r2<-imxs[,1]+imxs[,2];
+maxsp<-r1*0;
+for (k in 1:length(r1)) {
+maxsp[k]<-max(s[r1[k]:r2[k]]);
+}
+
+kimx <- which((s[imxs[,1]]*imxs[,2]>mmx*imxs[immx,2]/drange_thr) & (s[imxs[,1]]> 0.5*maxsp[]))
+
+
+#& (s[imxs[,1]]> 0.5*max(s[(imxs[,1]-imxs[,2]):(imxs[,1]+imxs[,2])])));
+
+mxs <- mxs[kimx]; sgmmxs <- sgmmxs[kimx];
+imxs <- imxs[kimx,];
+
+
+t <- 1:Nr;
+## PLot the results ##
+#plot(t, s*max(sgmmxs)/max(s),type='l');
+##lines(t(mxs), sgmmxs, type='p', col=3);
+#points(t(mxs), sgmmxs, col=3)
+
+return(as.matrix(imxs));
+} ##### END "peakWidth" #####
+
+########## Integrative downsampling #################
+msResample <- function(sigt, t0, masst, sigma0, asym, pfit, mHW, Gnoise){
+		
+###--------------------------------------------------------------  
+### Function resamples mass axis and integrates signal with the step
+### determined by the ratio of predicted STD for the peak outside
+### mass focusing range (given by quadratic polynomial fit) to the
+### intitial STD (left half) of the peak in the mass focusing range
+### as measured by gpdf_hw
+###
+### INPUT:
+### 
+### sigt - raw equisampled TOF signal;
+### t0 - input time ( may start above 1)
+### masst - mass axis, corresponding to sigt; ## hard coded
+### sigma0 - value of STD for the instrumental function peak in the
+### mass focusing range (in time points, can be fractional);
+### asym - right peak asymmetry in mass focusing range (can be negative);
+### pfit - is the array of polyfit coefficients [p1,p2,p3] for the
+### expected peak STD  outside mass focusing range; ## hard-coded
+### mHW - sufficient constant point density (peak HW)
+###
+### Output:
+###
+### sigr - resampled, integrated TOF signal;
+### massr - resampled mass axis, corresponding to sigr;
+### rrr - integer resampling rate
+### ii - resampled time
+### npikw - resampled peak width
+### nasym - resampled asymmetry
+###-------------------------------------------------------------------------
+
+
+#t1<-1:length(sigt);  -- data Start?? Read from input
+
+rr<-(pfit[1]*t0*t0+pfit[2]*t0+pfit[3])/sigma0;
+rr0<-rr; rrl0 <- length(rr);
+tt<-1:length(rr);
+stp<-round(sigma0/mHW);
+npikw <- sigma0; nasym <- asym;
+#print("const_rstep")
+#print(stp)
+if (stp >= 3){
+  if ((stp/2.0-trunc(stp/2.0))==0) { stp <- stp-1; }
+  trs <- seq (from=1, to=length(tt), by=stp);
+  k1 <- 1; sigrStp <- rep(0, length(trs));
+  ks <- (stp-1)/2;
+  sigrStp[1] <- sum(sigt[1:ks]);
+  ltrs <- length(trs);
+  sigrStp[ltrs] <- sum(sigt[(trs[ltrs]-ks):trs[ltrs]]);
+  for (jk in seq(from=trs[2], to=trs[ltrs-1], by=stp)) {
+     k1 <- k1+1; sigrStp[k1] <- sum(sigt[(jk-ks):(jk+ks)]);
+  }
+npikw <- npikw/stp; nasym <- nasym/stp;
+masst <- masst[trs];
+sigt <- sigrStp;
+rr0 <- rr0[trs];
+rr <- rr[trs];
+tt <- tt[trs];  ## tt or t0 ???
+}
+
+t1 <- 1:length(tt);
+
+mintt<-eval(which(rr0==min(rr0)))
+
+rr[(rr-floor(rr))<0.5]<-floor(rr[(rr-floor(rr))<0.5]);
+
+rr[-((rr-floor(rr))<0.5)] <- ceiling(rr[-((rr-floor(rr))<0.5)]);
+
+#print("minimum_RSrate")
+#print(min(rr))
+
+if (min(rr)>1) { ### YOU MAY comment the warning off -- it will run, but unreasonable PARS
+#warning("Check that your constant HW parameter is NOT less than minimum HW of the quadratic fit")
+}
+ir <- which(rr>=2); ir <- ir[ir>mintt];
+
+#print("how_many_irS")
+#print(length(ir))
+#print(ir[1])
+
+if (length(ir)<1){
+  sigr <- sigt;
+  massr <- masst;
+  rrr <- rep(1, length(tt));
+  ii <- tt;
+} else {
+  #print("onset_of_sampling")
+  #print(ir[1])  ## onset of sampling
+  mr <- max(rr[(ir[1]):length(rr)])  ## maximum sampling rate for this record
+  #print("max_rr")
+  #print(mr)
+  sigr <- sigt[1:(ir[1]-2)]; 
+  #print(length(sigr))
+  sigr[length(sigr)] <- sigr[length(sigr)]+0.5*sigt[ir[1]-1];
+  massr <- masst[1:(ir[1]-2)];
+  rrr <- rr[1:(ir[1]-2)];
+  ii <- 1:(ir[1]-2);
+  rsp <- ir[1]; rst <- ir[1];
+  if (mr<3){  # case of mr=2
+     rr[(ii[length(ii)]+1):length(rr)]<-2;
+     #rst <- c(rst, ii[length(ii)]+1);
+     #print("length_t1")
+     #print(length(t1))
+     if (t1[length(t1)]>(ir[1])){ #+1?
+     ii<-c(ii, t1[seq(from=ir[1], to=length(t1), by=2)]);
+     } else {
+     ii <- c(ii, ir[1])
+     #print(ii[length(ii)])
+     }
+     
+  }else{ ## mr > 2
+  for (jj in (rr[ir[1]]+1):mr) { ## start index resampling for mr>2
+     ich <- which(rr>=jj);
+     ich <- ich[ich>ir[1]];
+     rsp <- c(rsp,ich[1]);
+     rr[(ii[length(ii)]+jj-1):rsp[length(rsp)-1]]<-rr[rsp[length(rsp)-1]];
+     rst <- c(rst, ii[length(ii)]+jj-1);
+     ii<-c(ii, t1[seq(from=(ii[length(ii)]+jj-1), to=(rsp[length(rsp)]-jj), by=(jj-1))]);
+  }  ## finished index resampling
+##### HERE: treat tails for mr>2
+  rr[(ii[length(ii)]+mr):rsp[length(rsp)]] <- rr[rsp[length(rsp)]];
+  rst <- c(rst, (ii[length(ii)]+mr)); rst <- rst[2:length(rst)];
+  
+  strt <- ii[length(ii)]+mr;
+  endd <- t1[length(t1)]-ceiling(mr/2);
+  if (endd > (strt+mr)) {
+  ii <- c(ii, t1[seq(from=strt, to=endd, by=mr)]);
+  } else { ii <- c(ii, t1[strt])}
+  
+  }
+  
+  if (rst[1]<length(ii)) {
+  irs <- ii[rst[1]:length(ii)];
+  } else {
+  irs <- rst[1]
+  }
+  
+  massr <- c(massr, masst[irs]);
+  rrr <- c(rrr, rr[irs],rr[irs[length(irs)]]);
+  sr <- rep(0,length(irs)-1);
+  
+  if(length(irs)>2){
+  for (ri in 1:(length(irs)-1)) {  ## do integrative resampling of signal intensity
+     #print("inside_int_resampl")
+     #print(ri)
+     rri <- rr[irs[ri]];
+     rri1 <- rr[irs[ri+1]];
+     if ((rri/2.0-trunc(rri/2.0)) == 0) { ## even resampling rate
+       k <- rri/2;
+       sri <- sum(sigt[(irs[ri]-k+1):(irs[ri]+k-1)])+0.5*sigt[irs[ri]-k];
+       if ((rri1/2.0-trunc(rri1/2.0))!=0) { ## next resampling rate is odd 
+         sri <- sri + sigt[irs[ri]+k];
+       } else { sri <- sri + 0.5*sigt[irs[ri]+k];}
+
+     } else { ## odd resampling rate
+       k <- (rri-1)/2;
+       sri <- sum(sigt[(irs[ri]-k):(irs[ri]+k)]);
+       if ((rri1/2.0-trunc(rri1/2.0))==0) { ## next resampling rate is even
+         sri <- sri + 0.5*sigt[irs[ri]+k+1];
+       }
+
+     }
+     
+     sr[ri] <- sri;
+
+  }  ## end loop for integrative resampling
+  
+  sigr <- c(sigr, sr);
+  }  ## end-if length(irs)>2
+  
+  #print("after_resample_loop")
+  #print(length(sigr))
+  #print(length(ii))
+  
+  ## resample last point assuming that next rate is the same
+  ri <- length(irs); rri <- rr[irs[ri]];
+  if (length(irs)>1){
+  if ((rri/2.0-trunc(rri/2.0)) == 0) { ## even resampling rate
+    k <- rri/2;
+    sri <- sum(sigt[(irs[ri]-k+1):(irs[ri]+k-1)]);
+    sri <- sri +0.5*sigt[irs[ri]-k] + 0.5*sigt[irs[ri]+k];
+  } else { ## odd resampling rate
+    k <- (rri-1)/2;
+    sri <- sum(sigt[(irs[ri]-k):(irs[ri]+k)]);
+  }
+  ## add last resampled points
+  sigr <- c(sigr, sri, mean(sigr[(length(sigr)-k):length(sigr)]));
+  massr <- c(massr, masst[ii[length(ii)-1]]);
+  }else {
+  sigr <- c(sigr, sigt[irs])
+  massr <- c(massr, massr[irs])
+  }
+  
+  if (ii[length(ii)]< t1[length(t1)]){
+  rrr <- c(rrr, rrr[length(rrr)]);
+  ii <- c(ii, t1[length(t1)]);
+  massr <- c(massr, masst[t1[length(t1)]]);
+  sigr <- c(sigr, mean(sigt[ii[length(ii)-1]:ii[length(ii)]])); 
+  } 
+  
+#print("before_ramp")
+#print(length(sigr))
+
+sigr[is.na(sigr)]<-sigt[t1[ii[is.na(sigr)]]] ## correct for missing edge values ??
+
+## scale by sqrt(rate) for Gaussian noise
+  if (Gnoise==1){    
+    sigr[(ir[1]-2):length(sigr)]=sigr[(ir[1]-2):length(sigr)]/sqrt(rrr[(ir[1]-2):length(rrr)]);
+#print("IDS scaled for Gnoise: check to back the peak- amps after detection")
+  }  
+
+  ## find ramps
+  rmpi <- which(diff(rrr)==1); rmpi <- rmpi+1; ## ramp positions
+  #print("ramp_positions")
+  #print(rmpi)
+  rmpa <- sigr[rmpi]-sigr[rmpi-2]; ## ramp amplitudes
+  ## estimate noise amplitude (2*std) near signal minimum
+  sgnl <- sigr[rmpi[1]:(length(sigr)-2*mr-1)];
+  #print("length_signl")
+  #print(length(sgnl))
+  pst <- 1; ## intialize
+  mi <- which(sgnl==min(sgnl)); pst <- rmpi[1]+mi;
+  if (length(pst)>1) {pst <- pst[1]} ## correct for mulitple minima ??
+  
+  if ((pst > (rmpi[1]+3*mr)) & (pst < (length(sigr)-3*rrr[length(sigr)]))){
+  nsa <- 2*sd(sigr[(pst-2*rrr[pst]):(pst+2*rrr[pst])]);
+  }else{  ## pst is too close to 1st ramp or to signal-end: estimate "pre-ramp" noise
+  sgnl <- sigr[(rmpi[1]-7*npikw-2*mr):(rmpi[1]-2*mr-1)];
+  mi <- which(sgnl==min(sgnl)); pst <- rmpi[1]-7*npikw-2*mr+mi;
+  nsa <- 2*sd(sigr[(pst-2*mr):(pst+2*mr)]);
+  }
+  #print("noise_amplitude"); print(nsa);
+  i1 <- which((rmpa>nsa) & ((rmpa+nsa)>(sigr[rmpi+1]-sigr[rmpi-1])));
+  #ii[rmpi[i1]]; ## ramps to correct
+  #print(t0[tt[ii[rmpi]]])  ## all ramps in original time 
+
+  if (length(i1)>=1){  ## at least one ramp was detected
+  for (cr in 1:length(i1)) { ## correct for ramps
+     si <- rmpi[i1[cr]];
+     trmp <- ii[rmpi[i1[cr]]];
+     trmp1 <- ii[rmpi[i1[cr]]-2];
+     rrmp <- rrr[rmpi[i1[cr]]]; ## resampling rate at the ramp
+     
+     lcr <- trunc(length(which(rr0[trmp:length(rr0)]<rrmp))/rrmp);
+     wcr <- 1/lcr;
+     # length of points to correct to the right of ramp 
+     lcr <- abs(floor(lcr - 2*nsa/(wcr*rmpa[i1[cr]])));
+     # weights for points to correct to the right of ramp
+     wcr <- 1/lcr;
+     
+     if(rrmp > 1) {  # safety check for rate = 1 at the ramp added 03/20/10
+     	lcl <- trunc(length(which(rr0[mintt:trmp1]>(rrmp-1)))/(rrmp-1));
+     } else { lcl <- 1 } 
+     wcl <- 1/lcl;
+     # length of points to correct to the left of ramp
+     lcl <- abs(floor(lcl-2*nsa/(wcl*rmpa[i1[cr]])));
+     # weights for points to correct to the right of ramp
+     wcl <- 1/lcl; 
+     rrl <- length(which(rrr==rrmp)); 
+     rll <- length(which(rrr==(rrmp-1)));
+ 
+  
+     	if (lcr>0.5*rrl) {lcr <- floor(0.5*rrl); wcr <- 1/lcr}
+     	if (lcr >1){
+       		dcr <- 0.5*rmpa[i1[cr]]*(1-wcr*(1:lcr));
+       		sts <- si:(si+lcr-1);
+       		sigr[sts] <- sigr[sts]-dcr;
+     	}
+
+     	if (lcl>0.5*rll) {lcl <- floor(0.5*rll); wcl <- 1/lcl}
+    	 if (lcl > 1) {
+       		dcr <- 0.5*rmpa[i1[cr]]*(1-wcl*(1:lcl));
+       		sts <- seq(from=(si-2), to=(si-2-lcl+1), by=-1);
+       		sigr[sts] <- sigr[sts]+dcr;
+     	}
+
+  }  ## finish loop for ramp correction
+ } ## safe check that at least one ramp exists
+
+#print("after_ramp")
+#print(c(length(sigr), length(ii)))
+#print(ir[1])
+ ii <- tt[ii];
+#print(ii[ir[1]])
+ii[ir[1]:(length(ii)-1)]<-ii[(ir[1]+1):length(ii)] ## correct 1-point shift in resampling onset 11/19/07
+#print(ii[ir[1]])
+ii[length(ii)]<-rrl0; ## correct copy of end value 11/19/07
+#print(ii[(length(ii)-2):length(ii)])  
+
+} ### safety check: if resampling is at all needed
+
+
+if (length(sigr)<length(ii)) {ii <- ii[1:length(sigr)]} ## check for correct length to interpolate
+
+rst0<-t0[ii]; 
+if (!exists("rst")) {rst <- ii} # if no down-sampling was performed
+#print('INFO: *resSignal*, *resMass*, *resRate* and *resTime* fields of the list are returned')
+resampleOut <- list(resSignal=sigr, resMass=massr, resRate=rrr, resTime=rst0, resPikw=npikw, resAsym=nasym)
+rm(ii, rst, sigr, rrr)
+return(as.list(resampleOut))
+}  ###### END of "msResample" #####
+
+########## Gaussian left-half wavelet #################
+gausHalf <- function (gt, trnct){
+
+sigma <- gt/sqrt(2*log(2)); ## gt is in time clicks, normalize sigma for Gaussian HWFM 11/02/07
+gt<- ceiling(gt);
+lts <- ceiling(30*gt+2*sqrt(2*log(trnct))*sigma);
+ts <- as.vector(1:lts); 
+tmax <- length(ts)-20*gt;
+
+gfx <- dnorm(ts, tmax, sigma); 
+gfx <- gfx/max(gfx);
+#print(hwfmGausPeak(gfx,tmax))
+gfx[which(gfx < (1.0/trnct))] <- 0;
+gfx <- gfx[1:tmax];
+i1 <- which(gfx==0);
+gfx <- gfx[(i1[length(i1)]-6*gt):length(gfx)];
+
+return(as.vector(gfx));
+}  ###### END of "gausHalf" #####
+
+########## Gaussian right-half wavelet #################
+gausRHalf <- function (gt, trnct){
+
+sigma <- gt/sqrt(2*log(2)); ## gt is in time clicks, normalize Gaussian sigma 11/02/07
+gt <- ceiling(gt);
+lts <- ceiling(30*gt+2*sqrt(2*log(trnct))*sigma); ## wavelet length with given precision 12/03/07
+ts <- as.vector(1:lts); 
+tmax <- 20*gt;
+
+gfxr <- dnorm(ts, tmax, gt/sqrt(2*log(2))); 
+gfxr <- gfxr/max(gfxr);
+#print(hwfmGausPeak(gfx,tmax))
+gfxr[which(gfxr < (1.0/trnct))] <- 0;
+gfxr <- gfxr[tmax+1:length(gfxr)];
+i1 <- which(gfxr>0);
+gfxr <- gfxr[1:(i1[length(i1)]+6*gt)];
+
+return(as.vector(gfxr));
+} ###### END of "gausRHalf" #####
+
+########## Lorentzian left-half wavelet #################
+lorLHalf <- function(gt, trnct){
+
+tau <- 1/gt; # (sqrt(2)-1)/gt; ## gt is in time clicks, corrected 01/09/08
+gt <- ceiling(gt);
+lts  <- ceiling(10*gt+2*sqrt(trnct-1)/tau); ## wavelet length with given precision 12/03/07
+ts <- as.vector(1:lts); 
+tmax <- length(ts)-6*gt;
+
+
+lfxl <- tau/(1+((ts-tmax)*tau)^2);
+lfxl <- lfxl/max(lfxl);
+
+#print(hwfmGausPeak(lfxl,tmax))
+
+lfxl[which(lfxl<1.0/trnct)]=0;
+lfxl <- lfxl[1:tmax];
+
+i1 <- which(lfxl==0);
+lfxl <- lfxl[(i1[length(i1)]-2*gt):length(lfxl)];
+
+return(as.vector(lfxl));
+} ###### END of "lorLHalf" #####
+
+########## Lorentzian right-half wavelet #################
+lorHalf <- function(gt, trnct){
+
+tau <- 1/gt; # (sqrt(2)-1)/gt;  ## gt is in time clicks, corrected 01/09/08
+lts <- ceiling(10*gt+2*sqrt(trnct-1)/tau); ## wavelet length with input precision 12/03/07
+gt <- ceiling(gt);
+ts <- as.vector(1:lts); 
+tmax <- 6*gt;
+
+lfx <- tau/(1+((ts-tmax)*tau)^2);
+lfx <- lfx/max(lfx);
+
+#print(hwfmGausPeak(lfx,tmax))
+
+lfx[which(lfx<1.0/trnct)]=0;
+lfx <- lfx[tmax+1:length(lfx)];
+
+i1 <- which(lfx>0);
+lfx <- lfx[1:(i1[length(i1)]+2*gt)];
+
+return(as.vector(lfx));
+} ###### END of "lorHalf" #####
+
+########## Matlab-like cross-correlation #################
+myxcorr <- function(x, y, maxlag) {
+
+###----------------------------------------------------
+### Compute cross-correlation like Matlab.
+### Signals are zero-padded to the next (uuper) close power of 2 for the
+### longest of the two
+###
+### INPUT:
+### x - observed sampled discrete signal;
+### y - observed sampled discrete signal;
+### maxlag - maximum tim-lag for correlation;
+###
+### OUTPUT:
+### xcf - cross-correlation function on (-maxlag:maxlag) interval, 2*maxlag+1 length;
+###
+
+Nx<-force(length(x))
+Ny<-force(length(y))
+pow2<-ceiling(log2(max(c(force(2*Nx-1),force(2*Ny-1)))))
+xp<-c(x,rep(0,2^pow2-Nx));
+yp<-c(y,rep(0,2^pow2-Ny));
+
+Fx<-fft(xp, inverse=FALSE)
+Fy<-fft(yp, inverse=FALSE)
+xc<-Re(fft(Fx*Conj(Fy), inverse=TRUE))
+xcf<-c(xc[force(length(xc)-maxlag+1):force(length(xc))],xc[1:force(maxlag+1)]);
+
+return(as.vector(xcf))
+} ###### END of "myxcorr" #####
+
+########## Matlab-like circular-shift #################
+circShift <- function(dataV, shiftN) {
+
+if (shiftN>0) {
+
+shdat <- c(dataV[sort(c((length(dataV)-shiftN+1):length(dataV)),decreasing=TRUE)],dataV[1:(length(dataV)-shiftN)]);
+
+} else if (shiftN < 0) {
+
+shdat <- c(dataV[(-shiftN+1):length(dataV)],dataV[1:(-shiftN)]);
+
+}  else {shdat <- dataV}
+
+return(as.vector(shdat));
+} ###### END of "circShift" #####
+
+########## Matched filter coefficients for GL-wavelet #################
+matchFiltCoefGL <- function(inhw, las, trct) {
+
+wvlt <- c(gausHalf(inhw, trct), lorHalf((inhw+las), trct));
+Nw <- length(wvlt);
+
+h<-wvlt[sort(c(1:Nw),decreasing=TRUE)]; # create impulse response of the MATCHED filter;
+
+maxF <- which(h==max(h));
+
+if (maxF>Nw/2){h<-c(h,rep(0,(2*maxF+1-Nw)))} ## symmetrize the filter
+else {h <- c(rep(0,(2*maxF+1-Nw)),h)}
+
+
+return(as.vector(h));
+} ###### END of "matchFiltCoefGL" #####
+
+########## Matched filter coefficients for GG-wavelet #################
+matchFiltCoefGG <- function(inhw, las, trct) {
+
+wvlt <- c(gausHalf(inhw, trct), gausRHalf((inhw+las), trct));
+Nw <- length(wvlt);
+
+h<-wvlt[sort(c(1:Nw),decreasing=TRUE)]; # create impulse response of the MATCHED filter;
+
+maxF <- which(h==max(h));
+
+if (maxF>Nw/2){h<-c(h,rep(0,(2*maxF+1-Nw)))} ## symmetrize the filter
+else {h <- c(rep(0,(2*maxF+1-Nw)),h)}
+
+
+return(as.vector(h));
+} ###### END of "matchFiltCoefGG" #####
+
+########## Matched filter coefficients for LL-wavelet #################
+matchFiltCoefLL <- function(inhw, las, trct) {
+
+wvlt <- c(lorLHalf(inhw, trct), lorHalf((inhw+las), trct));
+Nw <- length(wvlt);
+
+h<-wvlt[sort(c(1:Nw),decreasing=TRUE)]; # create impulse response of the MATCHED filter;
+
+maxF <- which(h==max(h));
+
+if (maxF>Nw/2){h<-c(h,rep(0,(2*maxF+1-Nw)))} ## symmetrize the filter
+else {h <- c(rep(0,(2*maxF+1-Nw)),h)}
+
+
+return(as.vector(h));
+} ###### END of "matchFiltCoefLL" #####
+
+
+########## Matched filter function #################
+matchedFilter <- function(s, h) {
+
+###----------------------------------------------------
+### Produce matched filter smoothing for the input signal
+###
+### INPUT:
+### s - matrix of observed sampled discrete signals;
+### wvlt - pure signal wavelet (best fit);
+###
+### OUTPUT:
+### outs - matched filtered signal; 
+###
+
+## filter(x, filter, method = c("convolution", "recursive"),
+## sides = 2, circular = FALSE, init)
+Ns<-length(s)
+
+Nw<-length(h)
+
+sf <- filter(s, h, method = "convolution",sides = 2, circular = TRUE);
+
+outs<-s;
+
+
+outs<-sf*sum(s)/sum(sf);
+
+mxlag <-floor(length(outs)/7);
+cf<-ccf(s[(3*mxlag+1):(4*mxlag)],as.vector(outs[(3*mxlag+1):(4*mxlag)]),lag.max=mxlag, type="correlation", plot=FALSE);
+sh1<-cf$lag[cf$acf==max(cf$acf)]-1;
+#print(sh1)
+
+
+outs <- circShift(outs, sh1);
+l1 <- length(outs);
+outs[(length(outs)-floor(Nw/3)):length(outs)] <- s[(length(s)-floor(Nw/3)):length(s)] ## correct for filter shift into early points 11/14/07
+outs <- outs[1:l1];
+
+rm(sf, s) 
+return(as.vector(outs))
+} ###### END of "matchedFilter" #####
+
+########## Target filter coefficients #################
+trgFilt <- function(sWvlt, nu, dWvlt) {
+
+###
+### INPUT:
+### sWvlt - sampled discrete signal wavelet;
+### nu - noise power ratio to signal power;
+### dWvlt - desired signal wavelet shifted in respect to input;
+###
+### OUTPUT:
+### wf1 - Wiener filter coefficients in time domain;
+###
+
+M <- length(sWvlt);
+xc <- myxcorr(as.double(sWvlt), as.double(sWvlt), M-1);
+
+R <- toeplitz(xc[M:length(xc)]);
+Rn <- sum(as.double(xc[M:length(xc)]))*diag(1,nrow(R));
+R <- R+nu*Rn;
+
+p <- myxcorr(as.double(dWvlt), as.double(sWvlt), M-1);
+p <- matrix(as.double(p[M:(2*M-1)]), ncol=1);
+
+# Normalize equation by r0
+p <- p/R[1,1]; 
+R <- R/R[1,1];
+
+wf1<-solve(R,p);
+return(as.vector(wf1));
+} ###### END of "trgFilt" #####
+
+########## Coefficient truncation #################
+coefTrunc <- function(fcoef){
+
+maxF <- which(fcoef==max(fcoef));
+hw <- floor(length(fcoef)/2);
+ftrn <- circShift(fcoef, (hw-maxF)); ## symmetrize the coefficients around maximum
+flen <- floor(length(fcoef)/3)+20;
+ftrn <- ftrn[(hw-floor(flen/2)):(hw+floor(flen/2))];
+return(as.vector(ftrn));
+} ###### END of "coefTrunc" #####
+
+########## Optimal Filter coefficients for GL wavelet #################
+coefOptFiltGL <- function(inhw, las, trct) {
+
+nu <- 0.01;
+inpW <- c(gausHalf(inhw, trct), lorHalf((inhw+las), trct));
+trgW <- c(gausHalf(0.8*inhw, trct*1.3), lorHalf(0.8*(inhw+las), trct*1.3));
+trgW <- trgW*sum(inpW)/sum(trgW); # normalize target wavelet ??
+inpP <- which(inpW == max(inpW));
+trgP <- which(trgW == max(trgW));
+shp <- length(1:trgP)+length(inpP:length(inpW))-ceiling(2*inhw)+inpP-trgP; # target shift
+fleng <- inpP+shp+length(trgP:length(trgW));
+inpW <- c(inpW,rep(0,fleng-length(inpW)));
+trgW <- c(trgW,rep(0,fleng-length(trgW)));
+
+wfc <- trgFilt(inpW,nu,circShift(trgW, shp));
+wfc <- coefTrunc(wfc);
+
+return(as.vector(wfc));
+} ###### END of "coefOptFiltGL" #####
+
+########## Optimal Filter coefficients for LL wavelet #################
+coefOptFiltLL <- function(inhw, las, trct) {
+
+nu <- 0.001;
+inpW <- c(lorLHalf(inhw, trct), lorHalf((inhw+las), trct));
+trgW <- c(lorLHalf(0.8*inhw, trct*1.4), lorHalf(0.8*(inhw+las), trct*1.4));
+trgW <- trgW*sum(inpW)/sum(trgW); # normalize target wavelet ??
+inpP <- which(inpW == max(inpW));
+trgP <- which(trgW == max(trgW));
+shp <- length(1:trgP)+length(inpP:length(inpW))-ceiling(2*inhw)+inpP-trgP; # target shift
+fleng <- inpP+shp+length(trgP:length(trgW));
+inpW <- c(inpW,rep(0,fleng-length(inpW)));
+trgW <- c(trgW,rep(0,fleng-length(trgW)));
+
+wfc <- trgFilt(inpW,nu,circShift(trgW, shp));
+wfc <- coefTrunc(wfc);
+
+return(as.vector(wfc));
+} ###### END of "coefOptFiltLL" #####
+
+########## Optimal Filter coefficients for GG wavelet #################
+coefOptFiltGG <- function(inhw, las, trct) {
+
+nu <- 0.01;
+inpW <- c(gausHalf(inhw, trct), gausRHalf((inhw+las), trct));
+trgW <- c(gausHalf(0.8*inhw, trct*1.3), gausRHalf(0.8*(inhw+las), trct*1.3));
+trgW <- trgW*sum(inpW)/sum(trgW); # normalize target wavelet ??
+inpP <- which(inpW == max(inpW));
+trgP <- which(trgW == max(trgW));
+shp <- length(1:trgP)+length(inpP:length(inpW))-ceiling(2*inhw)+inpP-trgP; # target shift
+fleng <- inpP+shp+length(trgP:length(trgW));
+inpW <- c(inpW,rep(0,fleng-length(inpW)));
+trgW <- c(trgW,rep(0,fleng-length(trgW)));
+
+wfc <- trgFilt(inpW,nu,circShift(trgW, shp));
+
+maxW <- which(wfc==max(wfc)); 
+hw <- floor(length(wfc)/2);
+wfc <- circShift(wfc, (hw-maxW)); ## make a filter symmetric about maximum
+## no need to truncate if no secondary maximum is present
+#wfc <- coefTrunc(wfc);
+
+return(as.vector(wfc));
+} ###### END of "coefOptFiltLL" #####
+
+########## Optimal Filter function #################
+optFilt <- function(inSig, wfc) {
+
+Nw <- length(wfc);
+
+fs <- filter(inSig, wfc, method = "convolution",sides = 2, circular = TRUE);
+# for symmetric (around maximum) filters, no shift is needed
+
+mxlag <-floor(length(fs)/7);
+cf<-ccf(inSig[(3*mxlag+1):(4*mxlag)],as.vector(fs[(3*mxlag+1):(4*mxlag)]),lag.max=mxlag, type="correlation", plot=FALSE);
+sh1<-cf$lag[cf$acf==max(cf$acf)]-1;
+
+fs <- circShift(fs, sh1);
+
+l1 <- length(fs);
+fs[(length(fs)-floor(Nw/2)):length(fs)] <- inSig[(length(inSig)-floor(Nw/2)):length(inSig)] ## correct for filter shift into early points 11/14/07
+fs <- fs[1:l1];
+
+return(as.vector(fs));
+} ###### END of "optFilt" #####
+
+########## Nonliner Filter coefficients for GL wavelet #################
+coefNLFiltGL <- function(inhw, las, trct) {
+
+nu1 <- 0.01; nu2 <- 0.001; nu3 <- 0.0001;
+inpW<-c(gausHalf(inhw, trct), lorHalf((inhw+las), trct));
+trgW1<-c(gausHalf(0.2*inhw, trct*5), lorHalf(0.2*(inhw+las), trct*5));
+trgW2<-c(gausHalf(0.5*inhw, trct*2), lorHalf(0.5*(inhw+las), trct*2));
+trgW1 <- trgW1*sum(inpW)/sum(trgW1); # normalize target wavelet ??
+trgW2 <- trgW2*sum(inpW)/sum(trgW2); # normalize target wavelet ??
+
+inpP <- which(inpW == max(inpW));
+trgP <- which(trgW2 == max(trgW2));
+shp <- length(1:trgP)+length(inpP:length(inpW))-ceiling(2*inhw)+inpP-trgP; # target shift
+fleng <- inpP+shp+length(trgP:length(trgW2));
+inpW <- c(inpW,rep(0,fleng-length(inpW)));
+trgW1 <- c(trgW1,rep(0,fleng-length(trgW1)));
+trgW2 <- c(trgW2,rep(0,fleng-length(trgW2)));
+
+wfc1 <- trgFilt(inpW,nu1,circShift(trgW1, shp));
+wfc2 <- trgFilt(inpW,nu2,circShift(trgW1, shp));
+wfc3 <- trgFilt(inpW,nu3,circShift(trgW2, shp));
+wfc1 <- coefTrunc(wfc1);
+wfc2 <- coefTrunc(wfc2);
+wfc3 <- coefTrunc(wfc3);
+
+nlfCoef3 <- list(fc1=wfc1, fc2=wfc2, fc3=wfc3)
+
+return(as.list(nlfCoef3))
+} ###### END of "coefNLFiltGL" #####
+
+########## Nonliner Filter coefficients for LL wavelet #################
+coefNLFiltLL <- function(inhw, las, trct) {
+
+nu1 <- 0.001; nu2 <- 0.0001; nu3 <- 0.00001;
+inpW<-c(lorLHalf(inhw, trct), lorHalf((inhw+las), trct));
+trgW1<-c(lorLHalf(0.2*inhw, trct*5), lorHalf(0.2*(inhw+las), trct*5));
+trgW2<-c(lorLHalf(0.5*inhw, trct*2), lorHalf(0.5*(inhw+las), trct*2));
+trgW1 <- trgW1*sum(inpW)/sum(trgW1); # normalize target wavelet ??
+trgW2 <- trgW2*sum(inpW)/sum(trgW2); # normalize target wavelet ??
+
+inpP <- which(inpW == max(inpW));
+trgP <- which(trgW2 == max(trgW2));
+shp <- length(1:trgP)+length(inpP:length(inpW))-ceiling(2*inhw)+inpP-trgP; # target shift
+fleng <- inpP+shp+length(trgP:length(trgW2));
+inpW <- c(inpW,rep(0,fleng-length(inpW)));
+trgW1 <- c(trgW1,rep(0,fleng-length(trgW1)));
+trgW2 <- c(trgW2,rep(0,fleng-length(trgW2)));
+
+wfc1 <- trgFilt(inpW,nu1,circShift(trgW1, shp));
+wfc2 <- trgFilt(inpW,nu2,circShift(trgW1, shp));
+wfc3 <- trgFilt(inpW,nu3,circShift(trgW2, shp));
+wfc1 <- coefTrunc(wfc1);
+wfc2 <- coefTrunc(wfc2);
+wfc3 <- coefTrunc(wfc3);
+
+nlfCoef3 <- list(fc1=wfc1, fc2=wfc2, fc3=wfc3)
+
+return(as.list(nlfCoef3))
+} ###### END of "coefNLFiltLL" #####
+
+########## Nonliner Filter coefficients for GG wavelet #################
+coefNLFiltGG <- function(inhw, las, trct) {
+
+nu1 <- 0.01; nu2 <- 0.001; nu3 <- 0.0001;
+inpW<-c(gausHalf(inhw, trct), gausRHalf((inhw+las), trct));
+trgW1<-c(gausHalf(0.2*inhw, trct*5), gausRHalf(0.2*(inhw+las), trct*5));
+trgW2<-c(gausHalf(0.5*inhw, trct*2), gausRHalf(0.5*(inhw+las), trct*2));
+trgW1 <- trgW1*sum(inpW)/sum(trgW1); # normalize target wavelet ??
+trgW2 <- trgW2*sum(inpW)/sum(trgW2); # normalize target wavelet ??
+
+inpP <- which(inpW == max(inpW));
+trgP <- which(trgW2 == max(trgW2));
+shp <- length(1:trgP)+length(inpP:length(inpW))-ceiling(2*inhw)+inpP-trgP; # target shift
+fleng <- inpP+shp+length(trgP:length(trgW2));
+inpW <- c(inpW,rep(0,fleng-length(inpW)));
+trgW1 <- c(trgW1,rep(0,fleng-length(trgW1)));
+trgW2 <- c(trgW2,rep(0,fleng-length(trgW2)));
+
+wfc1 <- trgFilt(inpW,nu1,circShift(trgW1, shp));
+maxW <- which(wfc1==max(wfc1)); 
+hw <- floor(length(wfc1)/2);
+wfc1 <- circShift(wfc1, (hw-maxW)); ## make a filter symmetric about maximum
+
+wfc2 <- trgFilt(inpW,nu2,circShift(trgW1, shp));
+maxW <- which(wfc2==max(wfc2)); 
+hw <- floor(length(wfc2)/2);
+wfc2 <- circShift(wfc2, (hw-maxW)); ## make a filter symmetric about maximum
+
+wfc3 <- trgFilt(inpW,nu3,circShift(trgW2, shp));
+maxW <- which(wfc3==max(wfc3)); 
+hw <- floor(length(wfc3)/2);
+wfc3 <- circShift(wfc3, (hw-maxW)); ## make a filter symmetric about maximum
+
+## no need to truncate if no secondary maximum is present
+#wfc1 <- coefTrunc(wfc1);
+#wfc2 <- coefTrunc(wfc2);
+#wfc3 <- coefTrunc(wfc3);
+
+nlfCoef3 <- list(fc1=wfc1, fc2=wfc2, fc3=wfc3)
+
+return(as.list(nlfCoef3))
+}  ###### END of "coefNLFiltGG" #####
+
+########## Nonliner Geometric average filter function #################
+geomavFilt <- function(sigIN, trct, fc3list){
+
+wfc1 <- fc3list$fc1; wfc2 <- fc3list$fc2; wfc3 <- fc3list$fc3;
+
+Nw<-max(c(length(wfc1),length(wfc2),length(wfc3)))
+
+fs1 <- filter(sigIN, wfc1, method = "convolution",sides = 2, circular = TRUE);
+
+# for symmetric (around maximum) filters, no shift is needed
+
+mxlag <-floor(length(fs1)/7);
+cf<-ccf(sigIN[(3*mxlag+1):(4*mxlag)],as.vector(fs1[(3*mxlag+1):(4*mxlag)]),lag.max=mxlag, type="correlation", plot=FALSE);
+sh1<-cf$lag[cf$acf==max(cf$acf)]-1;
+
+#Nw1<-length(wfc1);
+#if (Nw1/2==trunc(Nw1/2)) {sh1 <- -Nw1/2;} # for symmetric (around maximum) filters
+#else {sh1 <- -(Nw1-1)/2;}
+#print(sh1)
+fs1 <- circShift(fs1, sh1);
+
+fs2 <- filter(sigIN, wfc2, method = "convolution",sides = 2, circular = TRUE);
+
+# for symmetric (around maximum) filters, no shift is needed
+
+mxlag <-floor(length(fs2)/7);
+cf<-ccf(sigIN[(3*mxlag+1):(4*mxlag)],as.vector(fs2[(3*mxlag+1):(4*mxlag)]),lag.max=mxlag, type="correlation", plot=FALSE);
+sh1<-cf$lag[cf$acf==max(cf$acf)]-1;
+#print(sh1)
+fs2 <- circShift(fs2, sh1);
+
+fs3 <- filter(sigIN, wfc3, method = "convolution",sides = 2, circular = TRUE);
+# for symmetric (around maximum) filters, no shift is needed
+
+mxlag <-floor(length(fs3)/7);
+cf<-ccf(sigIN[(3*mxlag+1):(4*mxlag)],as.vector(fs3[(3*mxlag+1):(4*mxlag)]),lag.max=mxlag, type="correlation", plot=FALSE);
+sh1<-cf$lag[cf$acf==max(cf$acf)]-1;
+#print(sh1)
+fs3 <- circShift(fs3, sh1);
+
+#print(length(fs1))
+#print(length(fs2))
+#print(length(fs3))
+
+fs<-sign(fs1*fs2*fs3)*((abs(fs1*fs2*fs3))^(1/3.));
+i1<-which((fs1*fs2<0) | (fs1*fs3<0) | (fs2*fs3<0) | (fs*fs1<0) | (fs*fs2<0) | (fs*fs3<0)| (fs <0) | (fs1 < 0) | (fs2 < 0) | (fs3 < 0));
+fs[i1] <- fs[i1]/(max(fs)*trct);
+
+l1<-length(fs)
+fs[(length(fs)-floor(Nw/2)):length(fs)]<-sigIN[(length(sigIN)-floor(Nw/2)):length(sigIN)]; ## correct for filter shift into early points 11/14/07
+fs <- fs[1:l1];
+sigOUT <- fs;
+rm(fs, fs1, fs2, fs3, sigIN);
+return(as.vector(sigOUT));
+
+} ###### END of "geomavFilt" #####
+
+
+########## Moving average filter function #################
+mavSmoothing <- function(inputSig,pointWindowLength) {
+
+###----------------------------------------------------------------- 
+### Function mavSmoothing uses moving average filter to smooth input (e.g., baseline,
+### 	removing small scale variations and preserving larger scale "pedestals" 
+###
+### INPUT:
+### 	inputSig - baseline estimated by local minima in spectra
+### 	pointWindowLengtht - filter window
+###	
+### OUTPUT:
+### 	bst - smoothed baseline
+###------------------------------------------------------------------
+
+ 
+   L <- pointWindowLength
+   
+   # create impulse response of the MAV filter;
+   h<-1/L*rep(1,L);
+   k1<-floor(L/2)
+ 
+   ## get the input info
+     inputSpectrum <- inputSig
+     Nc <- length(inputSpectrum)
+     outSpectrum<-filter(inputSpectrum,h, method="convolution", sides=2, circular=FALSE);
+     if ((L/2) != k1){
+       outSpectrum<-c(inputSpectrum[1:k1],outSpectrum[(k1+1):(Nc-k1)],inputSpectrum[(Nc-k1+1):Nc]);
+     }
+     else{
+       outSpectrum<-c(inputSpectrum[1:(k1-1)],outSpectrum[k1:(Nc-k1)],inputSpectrum[(Nc-k1+1):Nc]);
+     }
+     bst <- outSpectrum
+   
+   return(bst)
+ } ###### END of "mavSmoothing" #####
+

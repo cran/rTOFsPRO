@@ -1,0 +1,300 @@
+##############################################################################
+## This script sets options and parameters for signal processing performed  ## 
+## by "mainRTOFsPROc" and "mainRTOFsPROcModular"			    ## 
+##									    ##
+##									    ##
+## USAGE:								    ##
+## source(paste("directoryPATH/OptionsAndParametersPCAqc11.txt",sep="/"))   ##
+## Dependency: none							    ##
+## NOTE: Current default settings are optimized for the broad-range linear  ##
+## Ultraflex II MALDI-TOF spectra [Bunai et al: JPR 2007], 		    ##
+## e.g. included in "tofListPCAqc11.Rdat" example: "tofList".		    ##
+##									    ##
+## For new TOF data, the parameters should be optimized using average       ##
+## spectrum for the QC data set and following instructions for each field   ##
+## below using corresponding auxiliary functions of the package or 	    ##
+## built-ins. For input/output and usage description for auxiliary 	    ##
+## functions, type: help(function_name);				    ##
+##									    ##
+##############################################################################
+
+
+##################  DATA SOURCE AND CALIBRATION PARAMETERS ##################
+
+	### Provide filename/s for file/s containing tofList/s 
+	### and tofListMetaData
+	### assuming that multiple files belong to the same experiment (and meta-data)
+
+   TOFfileDIR = system.file("Examples", package ="rTOFsPRO")  # set path to working directory to load data from
+   rTofFileNames<-c("tofListPCAqc11.Rdat") #,"tofListPCAqc11.Rdat", "tofListPCAqc11.Rdat") 
+   rTofMetaFileNames<-c("tofListMetaDataPCAqc11.Rdat") #,"tofListMetaDataPCAqc11.Rdat", "tofListMetaDataPCAqc11.Rdat")
+   
+   averageOnly <- FALSE # if TRUE: get only "avreage" spectrum, and do *no processing* for tofList
+   monitorMemory <- FALSE # monitor memory usage in compression mode
+   debug <- FALSE # do debugging for provided data-example. NOTE: only used by "main...Modular"
+   saveOut <- FALSE # save aux-output in "...Test.Rdat" files and remove from workspace
+   save4Mlb <- FALSE # save output for Matlab in .mat
+	
+	## mass spectrometer ADC precision
+   instrPrc <- 8.0  # PBS II/Ultraflex 8-bit ADC
+
+	### Provide time to mass calibration equation ###
+   useMeta <- FALSE  # TRUE to use instrumental calibration parameters from meta-data
+			  # FALSE - override with user-defined calibration -- below
+   A <- 1.3201e6;   # TOF^2 - coefficient
+   B <- -2161.7;    # TOF (in msec) - coefficient
+   C <- 20.052;     # constant coefficient
+   nDelay <- 30949;  # new (recalibrated) initial time delay, to replace - "param.T0" 
+
+####################  PRELIMINARY ALIGNMENT PARAMETERS  #####################
+
+	### Select method for preliminary alignment
+
+#   paMethod <- "none"
+#  paMethod <- "globalAlign"  # slow: relies on local correlation for pivots
+  paMethod <- "delay" # time-delay parameters are read from meta-data, 
+		      # and correction is applied as needed
+
+	### Provide Parameters needed for Global Alignment (if paMethod <- "globalAlign")
+
+   noiseThres <- 0.3 # peaks above noiseThres * max intensity used as pivots for alignment
+   startS <- 6500.   # begin time for pivot peak detection
+   endS <- 30000.    # end time for pivot peak detection (before IDS)
+   appli <- TRUE     # FALSE for just the offset detection (no application to the data)
+   detect <- TRUE    # automatically detect global shifts to calculate time "scale" and "offset" 
+		     # if FALSE -- use "scale" and "offset" from meta-data
+
+####################  GLOBAL BACKGROUND SUBTRACTION PARAMETERS  #################
+
+## To check baseline subtraction performance for an average spectrum "avsp":
+## plot(avsp); points(baseline]); avsp_bs <- avsp - baseline;
+## NOTE: when pedestal removal is used downstream, the baseline model errors
+## are not significant for the overall performance
+
+### Select Background Subtraction Method
+
+	## Note: charge accumulation (RC) model is appropriate if long decay tails are observed
+	## for peaks (in the presence of coupling of detector amplifier)
+	## see [Malyarenko et al: Clin Chem 2005]
+
+#  bsMethod <- "none"  
+#  bsMethod <- "RC"
+   bsMethod <- "Analytical" # includes other models (Gaussian, Exponential, linear)
+#  bsMethod <- "ADCoffset"  # also requires offset samples (osS)
+
+### Provide Parameters for RC baseline subtraction (if bsMethod <- "RC")
+
+	## see [Malyarenko et al: Clin Chem 2005] for description
+   amp <- 0.0007 ## amplitude factor
+   decay <- 0.9989 ## decay rate
+	## NOTE: try applying to the average spectrum and observe
+	## correction of the slowly decaying right peak side (if appropriate)
+
+### Provide Analytical Background Correction Parameters (if bsMethod <- "Analytical")
+### !!! NOTE: Also applied before "Global Alignment" for "rough" baseline estimate
+
+	## To determine appropriate model choice: plot(log(abs(avsp[first_half_points]-offset))
+	## exponential baseline would produce linear log-trend, and Gaussian -
+	## parabolic in early data range (offset <- mean(avsp[osS]); ## constant offset)
+   mCH <- 3; ## 3- Gaussian bs-model, 2- exp bs-model, 1- linear bs-model
+
+	## TOF range to estimate constant ADC offset (late in the record: far from
+	## a matrix hump and without peaks)
+   osS <- 120000:122000; ## is used to estimate the offset <- mean(spectrum[osS]): REQUIRED for all methods
+
+	
+	## range of spectrum points without peaks on the decaying part (after the hump, 
+	## before the leveling off) for baseline-trend estimate by "bsModel.m".
+	## estimate by visual inspection: plot(avsp);
+   bsS <- c(6500:11500,13500:18000,29500:31500,37500:38000); # c(199, 0.05) -- c(window, corf)
+	## if length(bsS) < 3, uses auto-trend detection procedure 
+	## bsS <- c(window, corf): use window and correctionn factor for auto-trend option; 
+	## recommended: window ~ odd(6*HWFM); corf ~ 10/window
+ 
+#####################  INTEGRATIVE DOWN-SAMPLING PARAMETERS  ######################
+
+## NOTE: to check the quality of integrative down-sampling, after running
+##"msResample", apply "peakWidth" to the down sampled spectrum:
+## the result should produce a constant peak-width (pHW) over the full data range. 
+## Optimal performance may require a couple iterations through the "pfit" parameters
+## and performance check after down-sampling.
+
+### Provide parameters for down-ampling
+
+	## constant peak width observed over the mass focusing range (in time clicks)
+   pikw0 <- 34  # constant peak width !!! NOTE: also used for MAV smoothing before globalAlign
+	## find left-half width of a peak in early mass range, e.g., by visual
+	## inspection: plot(avsp-baseline);
+	## or using "peakWidth" output in the constant peak-width range
+
+	# choose minimal peak width desired after down-sampling (in time clicks)
+   mpikw <- 4.5 # minimum sufficient peak widths: 3-5 recommended (default 4.5)
+
+   backIntr <- FALSE # interpolate IDS back to original time (into tofList)
+
+	## parameters for quadratic fit of peak half-width dependence on TOF
+   p1 <- 4.439e-8  # quadratic coefficient      
+   p2 <- -0.0015519 # linear coefficient
+   p3 <- 54.755  # constant coefficient
+	## apply "peakWidth" for (avsp-baseline) to find observed peak
+	## half-width dependence on time; remove the outliers (usually, of higher
+	## width) due to multiple overlapping peaks or noise; and perform a
+	## quadratic fit to find the coefficients: 
+	## lsfit(matrix(t^2,t),measured_width, intercept=TRUE); t = (1:length(avsp))';
+	## an example of the "peakWidth" output: [peak_position, peak_width]
+	## pair for the deafult paramepetrs is provide with this toolbox in "hwqc11" array 
+	## (saved in "dataexmpl/qc11dat_avsp_hw.Rdat") 
+	## width_fit = p1*t.^2+p2*t+p3;
+	## to check performance visually: 
+	## plot(t, avsp*max(peak_width)/max(avsp)); points(peak_positions, peak_width, col="dark red");
+
+	## choose high-frequency noise model to determine if it is necessary to scale 
+	## the down-sampled noise by sqrt(window)
+#  Gnoise <- 0 #(Derivative)
+   Gnoise <- 1 #(Gaussian)
+	## derivative noise (e.g., PBS: produced by differential amplifier) exhibits
+	## higher FFT spectral density for lower frequencies; spectral density of
+	## white noise is uniform. Use Gaussian, when not sure.
+
+#####################  FILTER PARAMETERS AND OPTIONS  ######################
+
+	## choose a filter algorithm: see [Malyarenko et al: RCMS 2006] for guidelines
+	## NOTE: assumes that peak-width is constant (down-sampling is required before
+	## application in the broad m/z range)
+#  algo <- "none"
+   algo <- "optimalLinear"
+#  algo <- "matched"
+#  algo <- "nonLinear"
+#  algo <- "MAV"
+
+	## peak wavelet model choice for target filter (OLF or non-linear): 
+	## left-Gaussian-right-Lorentzian (GL), asymmetric Gaussian (GG), or asymmetric Lorentzian (LL)
+#  wavelet <- "GG" # Gaussian
+#  wavelet <- "GL" # Gaussian-Lorentzian
+   wavelet <- "LL" # Lorentzian
+	## to find best analytical approximation for the peak shape, choose a single
+	## peak in the spectrum: mpk <- avsp_ds(peak_range); mpk<-mpk/max(mpk); ## to normalize 
+	## and fit it to the analytical shapes: GL, GG or LL, e.g., using built-in "dnorm" to
+	## model a Gaussian, and "lorf" for Lorentzian, e.g.: wvlt <-
+	## c(gaussian[1:max_position]/max(gaussian), lorentzian[max_position+1:end]/max_lorentzian]; 
+	## choose the best fit by minimizing the difference between experiment and
+	## model: plot(mpk-wvlt);  
+	## NOTE: inappropriate peak shape may cause mis-shaping artifacts by target filtering
+
+	## by separately fitting the left and right half of the model peak,
+	## determine if the right-side has different width: 
+	## lasym = right_sigma -left_sigma
+   lasym0 <- 0.0  # asymetry for right-half of a peak: can be +/-
+
+########################  PEDESTAL REMOVAL PARAMETERS  ######################
+
+### Select Pedestal Removal Method
+
+#  prMethod <- "none"
+   prMethod <- "lmMAV"
+
+### Provide local minima MAV (lmMAV) Pedestal Removal Parameters
+	## NOTE: assumes constant peak-width, should be used on down-sampled data (after IDS)
+   nf <- 10 # peak-width multiplier of MAV window of local minima trend
+	## Higher fractions will produce smoother trends (less of peak pedestals
+	## will be removed). Inspect visually for a few choices: 5, 10, 20 and
+	## with above estimated half-width of a peak (pHW) in down-sampled/filtered signal:
+	## plot(avsp); points(pedestal); avsp_pr <- avsp-pedestal; 
+
+
+
+##########################  PEAK DETECTION PARAMETERS  ########################
+
+	## visually check if high-frequency noise amplitude changes with TOF: plot(avsp);
+	## can be evaluated from: std(avsp_bs[range]); ## using different 
+	## ranges without peaks, and modeled analytically: see "noise amplitude" in "mainRTOFsPROc"
+   nsdepBS <- TRUE # noise dependent on baseline
+	## set to TRUE if noise is sqrt-dependent (Poisson) on baseline amplitude 
+	## e.g., use TRUE for Bruker Ultraflex TOF, and FALSE for Ciphergen PBS TOF
+	## used for estimate of noise amplitude after different filtering options
+	## if not sure, use FALSE for stationary noise (constant noise amplitude) -- may
+	## produce higher false detection in the region of higher noise amplitude,
+	## and require manual correction of the peak list
+
+
+	### Select Peak Picking Method
+
+#  ppMethod <- "none"
+   ppMethod <- "Trivial"
+#  ppMethod <- "WM" # Maximum Likelihood Method: <SEE NOTE and SETUP BELOW>
+
+
+### Provide Trivial Peak Picker Parameters
+
+	## choose the trustworthy range, above matrix or mass deflector artifacts, or residual ringing
+	## from detector overload by visual inspection of the average spectrum after pedestal removal
+	## plot(average_processed_spectrum);
+	## can be estimated as (original deflector/matrix hump time)/(constant down sampling rate)
+   startPP <- 1000 # onset of peak detection in down-sampled time ticks
+
+	##  Signal-to-noise (amplitude) threshold for peak detection in respect to global
+	##  baseline and local minima, used by "trivialPeakFinderSNR"
+   snr <- 2.0 # also used by alignment to average
+	##  noise amplitude parameter "naml" is estimated automatically depending on
+	##  "nsdepBS" and filter choice: see "noise amplitude" in "mainRTOFsPROc"
+	##  to visually check the quality of peak detection (false and true peaks)
+	##  plot(1:length(avsp_pr), avsp_pr); points(pks, avsp_pr[pks], col="dark red");
+
+#========================================================================#
+# NOTE: Patent: Tracy, E. R.; Chen, H.; Cooke, W. E., Automatic peak	 #
+# identification method. U.S. Patent No. 7,219,038, May 15, 2007 	 #
+# (Assigned to the College of William and Mary).			 #
+##======================================================================##	
+
+	### SETUP FOR WM TOOLS ####
+	### For W&M Peak Detection & Alignment (BELOW) to work, source WEC-library: 
+  #source(paste("ppcsRtools/Lib_WECworking.r",sep="/")) # 
+	# Load C routines
+  #dyn.load(file.path( paste(paste("ppcsRtools/cNewUtil", .Platform$dynlib.ext, sep=""), sep="/" ) )); 
+
+	### Provide WM Peak Picker Parameters
+
+   NoiseModel <- "GA"
+   base <- TRUE
+   Noise <- NULL
+   tStart <- 1000
+   tEnd <- 20000
+#  occuranceFraction <- 0.5
+#  Npeaks <- 20
+#  maxShift <- 25
+	### Indicate if linear baseline subtraction (local) should be applied after Peak Picking
+   BK_CORR <- FALSE # default
+#  BK_CORR <- TRUE
+
+##########################  ALIGNMENT PARAMETERS  ###########################
+
+	### Select Alignment Method
+
+#  alMethod <- "none"
+   alMethod <- "AlignToAverage"
+#  alMethod <- "WM"
+ 
+	### Select AlignToAverage parameters
+   align2Training <- TRUE  # TRUE only for alignment to *DOWN-SAMPLED* training peak list
+
+	# save and provide training aligned peak list  in the file below *in "DS"-domain*
+   aplTrainFileName <- "alignedPeaksTrain.Rdat" # file with "aplTrain" structure
+
+	# for  "AlignToAverage" *no* peakList is required:
+   noPL <- TRUE # FALSE will generate peakList for all spectra (no PL generated if TRUE)
+		 
+	### Select output domain for aligned peak lsit
+   alPeakDomain <- "OT" # "DS" for down-sampled, or "OT" - original time (also default), or "MZ" - mass
+
+	### Provide WM Alignment Parameters
+
+   alignFraction <- 0.35
+   detectFraction <- 0.2
+   tStart <- 5000
+   tEnd <- 49000
+   maxShift <- 30
+   ShiftYes <- TRUE	## Use constant shift per sample
+   SlopeYes <- FALSE	## Use linear shift per sample
+
+##########################################################################
+

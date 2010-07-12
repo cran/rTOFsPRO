@@ -1,0 +1,652 @@
+
+### MBT added 12-2-08
+
+userError<-function (msg) 
+{
+    stop(msg, call. = FALSE)
+}
+### MBT end
+
+
+noiseEstmtr2 <- function(spect)
+{
+
+#----------------------------------------------------
+# Estimate noise level (STD) for TOF record (assuming constant peak width)
+#
+# INPUT:
+# spect - spectrum signal (resampled or range of constant peak width);
+#
+# OUTPUT:
+# ns - noise estimate assuming Gaussian (random) noise;
+#
+# USAGE:
+# ns <- noiseEstmtr2 (spect);
+# Dependency: none
+#
+
+ 
+## Part 1  Noise Level Estimation
+
+len <-length(spect); 
+
+#A <- spect[1:(len-1)]; B <- spect[2:len]; d1 <- A - B; 
+d1 <- -diff(spect,1,1); 
+
+spect <- sort(d1); 
+#print(length(spect)) # debug
+tstart <- min(which(spect>0))-round(0.05*len);
+tend <- tstart+round(0.1*len);
+#print(c(tstart,tend)) #debug
+spect <- spect[tstart:tend];
+tt <- 1:length(spect); #tt <- t(tt);
+linef <- lsfit(tt, spect, intercept  = TRUE); # line(tt,spect);  
+fcoefs <- coef(linef)
+ns <- len*fcoefs[2]/3.55; 
+
+return(ns);
+}
+
+
+trivPP_call <- function(tofList, snr, naml, HWFM, fwl, stPk, dataStart)
+{
+###----------------------------------------------------
+### Find time position of the pivot peaks above SNR 
+### input signal
+###
+### INPUT:
+### tofList -  list of observed sampled discrete signals (rows);
+### snr - signal-to-noise ration for peak detection
+### naml - noise amplitude list (for tofList);
+### HWFM – half-width at half-maximum for the model signal wavelet
+### fwl - filter wavelet length applied for signal processing
+### stPk - starting point (tof-spectrum index) for peak detection (e.g., after matrix hump)
+### dataStart - defines what is the absolute start location for the input time points
+###
+###
+### OUTPUT:
+### peakList - time point numbers for pivots;
+###
+
+
+spectraName <- names(tofList)
+
+Ns <- length(tofList)
+
+if ( snr <= 0 )
+{
+	userError( "Signal-to-Noise ratio must be positive." );
+}
+
+
+if ( HWFM < 1 )
+{
+	userError( "Invalid Peak Half-Width; it must be at least 1.0" );
+}
+
+pivLength=0;
+
+## define the results list
+peakList <- list()
+
+for (i in 1:Ns){
+ spec <- tofList[[i]]
+ ## zero-fill for NA values
+ spec[is.na(spec)] <- 0 
+ peakTime <- spec * 0;
+ peakAmps <- peakTime
+ timeUncerts <- peakTime
+ ampUncerts <- peakTime
+ 
+ Nt <- length(spec)
+ ampN <- as.numeric(naml[[i]]);
+ stdNoise <- ampN/3;
+	
+     #print(c(length(ampN),Nt)) #debug
+ if (Nt != length(ampN)) {
+	userError("Noise amplitude vector is not the same length as signal")
+ }
+    	qin <- 1:Nt
+	k<-qin; #qin[spec/ampN >= snr] ## use noise amplitude 11/08/07 << REV
+	if ( length( k ) >= 3 )
+	{     ## Step 1: find all local maxima and minima
+		x<-diff(spec[k],1,1)
+		xl<-x[1:length(x)-1]
+		xr<-x[2:length(x)]
+		nrtp <- (xl>0 & xr<=0) | (xl==0 & xr<0);
+		nrbt<- (xl<0 & xr >=0) | (xl==0 & xr>0)
+		xx <- 1:length(x);
+		nb <- c(1, xx[nrbt]+1); ## tentative minimum
+		nt <- xx[nrtp]+1; ## tentative maximum
+		
+		## Step 2: Coalesce rising plateaus to find the right-most one
+		curt <- 1; curb <- 1; peak <- c(0); bots <- c(1); 
+		numtop <- 1; numbot <- 1;
+		while ((curt < length(nt)) & (curb < length(nb))) {
+			while ((nb[curb]<nt[curt]) & (curb < length(nb))) {
+			curb <- curb+1;
+			}
+		bots[numbot]<-nb[curb];
+		numbot<-numbot+1;
+			while ((nt[curt]<nb[curb]) & (curt < length(nt))) {
+			curt <- curt+1;
+			}
+		peak[numtop]<-nt[curt];
+		numtop <- numtop+1;
+		}
+		rm(numtop, numbot, curt, curb, nb, nt, nrbt, nrtp)
+		leftMin <- c(1); rightMin <- c(1);
+		for (i1 in 2:length(peak)) {
+		temp <- peak[i1-1]:peak[i1];
+		leftMin[i1] <- max(temp[spec[k[temp]]==min(spec[k[temp]])]);
+		rightMin[i1] <- min(temp[spec[k[temp]]==min(spec[k[temp]])]);
+		}
+		rightMin <- c(rightMin[2:length(rightMin)], length(x));
+ 
+		con1 <- abs(spec[k[leftMin]]-spec[k[peak]])/ampN[k[peak]]; ## << REV
+		con2 <- abs(spec[k[rightMin]]-spec[k[peak]])/ampN[k[peak]]; ## << REV for ampN vector
+		
+		peak <- peak[(con1 >= snr) | (con2 >= snr)];
+		peak <- peak[spec[k[peak]]/ampN[k[peak]] >= snr];
+
+		if ( length( peak ) > 0 )
+		{
+			pivots<-k[peak]
+		} else
+		{
+			pivots <- 0;
+		}
+	} else
+	{
+		if ( length( k ) > 0 )
+		{
+			pivots <- k[spec==max(spec[k])];
+		} else
+		{
+			pivots <- 0;
+		}
+	}	
+	## use only peaks no closer than 2*HWFM to the origin (to estimate uncertainties)
+	pivots<-pivots[(pivots>2*HWFM)]   ## bug fix for 6086, Dasha 06/22
+	pivots <- pivots[which(pivots>stPk & pivots < (length(spec)- ceiling(fwl/2)))]; # trustworthy range
+
+	numberPeaks <- length(pivots)
+#print(length(pivots)) #debug
+	if ( numberPeaks > 0 )  ## REV << check that stdNoise is vector or add ampN/3?
+	{
+		peakTime[1:numberPeaks]<-pivots
+#print(peakTime) #debug
+		peakAmps[1:numberPeaks]<- spec[peakTime[1:numberPeaks]];
+		ampUncerts[1:numberPeaks]<-peakTime[1:numberPeaks]*0+ampN[pivots];
+		snrPeaks<-peakAmps[1:numberPeaks]/stdNoise[pivots];
+	
+		for (j in 1:numberPeaks){
+			if ((snrPeaks[j]>2) & (peakTime[j]>2*HWFM)){
+				y<-1.0/(1.0-2/snrPeaks[j]);
+				tempd <- spec[(peakTime[j]-2*HWFM):peakTime[j]]
+				timeUncerts[j]<-length(tempd[tempd>=tempd[length(tempd)]/y])
+			}else{
+				timeUncerts[j]<-HWFM;
+			}
+		}
+	##print("assign_info_list")
+		info <- list( 
+			"Positions" = peakTime[1:numberPeaks]+dataStart-1,
+			"Intensities" = peakAmps[1:numberPeaks],
+			"PositionUncertainties" = timeUncerts[1:numberPeaks],
+			"IntensityUncertainties" = ampUncerts[1:numberPeaks] )
+#print(info$Positions) #debug
+	} else
+	{       print("no_peaks")
+		info <- list( 
+			"Positions" = NULL,
+			"Intensities" = NULL,
+			"PositionUncertainties" = NULL,
+			"IntensityUncertainties" = NULL )
+	}
+
+	## append results to the list
+  	peakList[i] <- list( info )  # allow assignment for repeated names 02/11/10
+#print(peakList[[i]]$Positions) #debug
+
+}
+names(peakList) <- spectraName;
+return(peakList);
+#tofList <- NULL;
+}
+
+
+peakAlignAv<-function(peaks,tofList,noiseL,HWFM){		
+
+###----------------------------------------------------------------- 
+### Function peakalignAv aligns peaks from tofList spectra with peaks found
+###   in averaged spectrum 
+###
+### INPUT:
+### 	peaks - peak positions found in the averaged spectrum;
+###	tofList - list of TOF spectra in the same domain (down-sampled or original) as "peaks"
+### 	HWFM - peak half-width (window for alignment) -- constant for down-sampled data;
+###
+### OUTPUT:
+### 	alignedPeakList
+###
+###------------------------------------------------------------------
+
+  alignedPeakList <- list();
+  alignedPeakList$peaks <- peaks;
+  alignedPeakList$data <- list();
+
+  specName<-names(tofList)
+  numSpectra<-length(tofList)
+  numPeaks<- length(peaks) 
+  peakInt<-array(0,numPeaks) 
+  peakShifts<-peakInt 
+
+  zeroVector<-rep(0,numPeaks)
+
+## align
+
+for (i in 1:numSpectra) {
+    spectra <- tofList[[specName[i]]]
+    nam <- noiseL[[i]]
+
+    for (j in 1:numPeaks) { 	
+        w <- spectra[(peaks[j]-HWFM):(peaks[j]+HWFM)];      
+       mw<-max(w) 
+      imw <- which.max(w)
+      x <- diff(w,1,1);		# first difference
+	xEnd<-length(x)
+       xl <- x[1:xEnd-1]	# left side
+       xr <- x[2:xEnd]		# right side
+       neartop <- (xl > 0 & xr <= 0) | (xl == 0 & xr < 0)     
+      xx <- 1:xEnd
+      nt <- xx[neartop]+1 		# tentative maximum     
+      if(length(nt)>0) {       
+          if(length(nt)>1) { 
+            y<-max(w[nt])
+            iy<-which.max(w[nt])
+           peakInt[j]<- y  
+           peakShifts[j]<-nt[iy]-HWFM-1 
+           }
+          else {   
+              peakInt[j]<-w[nt]
+              peakShifts[j]<-nt-HWFM-1                
+          }    
+     } else {
+            if(abs(imw-HWFM-1) < HWFM) {  
+             peakInt[j] <- mw 
+                peakShifts[j] <- imw-HWFM-1 
+          }  else {
+                 peakInt[j]<-spectra[peaks[j]] 
+                 peakShifts[j]<-0  
+            } 
+      }       
+    }     
+ 
+peakInt<-as.numeric(peakInt)
+uncertInt <- nam[peaks+peakShifts] # local noise estimate at peak position
+
+## Construct alignedPeakList
+
+ 	alignedPeakData <- list("Intensities" = as.vector( peakInt ),
+  		"PositionShifts" = as.vector(peakShifts),
+  			"PositionUncertainties" = zeroVector + max(abs(peakShifts)),
+  				"IntensityUncertainties" = uncertInt )
+  
+  	alignedPeakList$data[i] <- list( alignedPeakData ); # allow assignment for repeated "names"
+  }
+  names(alignedPeakList$data) <- specName;
+  return(alignedPeakList)
+}
+
+
+#########GLobal alignment routines below########
+######### Pivot peak finder ############
+pivPeak <- function(refsig, thres, phw) {
+
+###----------------------------------------------------
+### Find time position of the pivot peaks above threshold 
+### input signal
+###
+### INPUT:
+### refsig - observed sampled discrete reference signal nromalized to its maximum = 1;
+### thres - intensity threshold for pivot peaks in respect to maximum (e.g. 0.1);
+### phw - peak half-width in the pivot detection range
+###
+### OUTPUT:
+### pivots - time point numbers for pivots;
+###
+
+qin<-1:length(refsig);
+k<-qin[refsig>thres];
+x<-diff(refsig[k],1,1)
+xl<-x[1:length(x)-1]
+xr<-x[2:length(x)]
+p<-2:length(k)-1;
+p1<-p[(xl>0 & xr<=0) | (xl==0 & xr<0)]
+pivots<-k[p1]
+n1 <- which(diff(pivots)<phw);
+loopn <- 0;
+while (length(n1)>0 & loopn < 10){  # combine pivots closer than HW (to get 1/peak)
+	loopn <- loopn + 1;
+	#print(loopn)
+	pcomp <- cbind(pivots[n1],pivots[n1+1]);
+	comp <- c(pivots[n1],pivots[n1+1])
+	dpiv <- setdiff(pivots,comp)
+	pcomp1 <- pcomp[,1];
+	d1 <- dim(pcomp)[1]
+	for (jj in 1:d1){  # select pivot of max signal for closer than HW pivots
+    	pcomp1[jj] <- pcomp[jj,which(refsig[pcomp[jj,]]==max(refsig[pcomp[jj,]]))]
+    	}
+	pivots <- sort(unique(c(pcomp1,dpiv)))
+	n1 <- which(diff(pivots)<phw);
+	rm(pcomp,comp,dpiv, pcomp1,d1,jj)
+}
+rm(qin,k,x,xl,xr,p,p1,n1,loopn)
+return(as.vector(pivots))
+
+}
+
+########## Local jitter detection by correlation (for global alignment) ##########
+locjitdet <- function(fs, ps, sw, startS, endS, spectraNames){
+
+###-----------------------------------------------------------
+### Compute jitter  and triggering error in time points for the set of signals
+### at the pivit peak positions.
+### Jitter is measured by the shifts of the maxima for the local
+### cross-correlation function in the vicinity of a peak.
+### Jitter is detected in resspect to the FIRST (reference) signal in the set.
+###
+### INPUT:
+### fs - matrix of sampled discrete signals (columns - intensities)
+### ps - peak set for fs precomputed eg. with "pivpiks"
+### sw - maximum lag for cross-correlation (shift window ~ of twice
+### peak sigma, estimated eg. with "peakwidth_pf");
+###
+### OUTPUT:
+### out$pjit = fsj (i,j) - jitter in point numbers for the corresponding peak
+### "i" in the signal "j" as measured by the local cross-correlation to the reference signal;
+### out$trerr = avshift(j) - average triggering error for the j-th record
+###-----------------------------------------------------------
+
+### "sw" is a window for local correlation function (maximum lag)
+### sw=10 is recommended for SELDI data (focused from 2 to 15 kDa)
+
+	cw<-3*sw; # is a half-window in a spectrum for the local X-corr calculation
+	ps<-as.vector(ps)
+	
+	l0<-length(ps)
+
+	### remove peaks for which correlation cannot be calculated with the required window
+	maxpoint<-eval(nrow(fs))
+	ps[ps<(1+cw)]<-0               ### remove peaks closer than correlation window to the record's zero
+	ps[ps>(maxpoint-eval(cw)-1)]<-0 ### remove peaks closer than correlation window to the record's end
+	t<-ps[ps!=0]
+	ps<-t
+	
+	Nr<-length(ps);
+	if ( Nr < 3 )
+	{
+		userError( "Could not find at least 3 peaks in the reference spectrum." );
+	}
+
+	Nc<-ncol(fs); ### if we have multiple spectra
+
+	if (Nr<l0) { print('WARNING: less peaks used -- some peaks outside allowed correlation window')}
+
+	fsj<-matrix(rep(0,Nr*Nc),nrow=Nr,ncol=Nc);  ### initialize jitter table for the peaks
+	msj<-fsj; ### initialize maximum correlation coefficient table for the peaks
+
+	enhstart<-eval(cw-floor(sw/2)) ### peak enhancement range for the reference signal
+	enhend<-eval(cw+floor(sw/2))
+	refsig <- fs[,1]/max(fs[startS:endS,1]);
+	lmax <- trunc(length(startS:endS)/2);
+	#lmax <- length(startS:endS)-1;
+	if (Nr>0)
+	{
+		for (j in 2:Nc)
+		{   
+			### calculate jitter for all peaks
+			nsigJ <- fs[,j]/max(fs[startS:endS,j]);
+			cfg <- ccf(refsig[startS:endS], nsigJ[startS:endS], lag.max=lmax, type="correlation", plot=FALSE);
+			cw <- 3*abs(cfg$lag[cfg$acf==max(cfg$acf)]) + 3*sw;
+			
+			cwStart <- cw + 1;
+			cwEnd <- length( refsig ) - cw;
+			
+			peaksWindowStart <- ps[ ps < cwStart ];
+			peaksWindowEnd <- ps[ ps > cwEnd ];
+			
+			windowStartError <- length( peaksWindowStart ) > 0;
+			windowEndError <- length( peaksWindowEnd ) > 0;
+			
+			if ( windowStartError || windowEndError )
+			{
+				msg <- paste( "\nWhile aligning spectrum '", spectraNames[j], "' to reference spectrum '", spectraNames[1], "':\n\n", sep = "" );
+				checkRefSpecMsg <- "\nPlease check the reference spectrum.";
+				if ( cwStart >= cwEnd )
+				{
+					userError( paste( msg, "For all pivot peaks, the correlation window goes beyond the range of the spectrum data.", checkRefSpecMsg, sep = "" ) );
+				}
+				
+				msg <- paste( msg, "For some pivot peaks, the correlation window goes beyond the range of the spectrum data.", sep = "" );
+				msg <- paste( msg, checkRefSpecMsg, sep = "" );
+				msg <- paste( msg, "\n\nThe peaks that caused this problem are ", sep = "" );
+				
+				correctionStart <- "\nIf the reference spectrum is good, then adjusting ";
+				correctionEnd <- " will exclude these peaks and should resolve this error.";
+				
+				if ( windowStartError && windowEndError )
+				{
+					msg <- paste( msg, "<= ", peaksWindowStart[ length( peaksWindowStart ) ], " and >= ", peaksWindowEnd[ 1 ], ".", sep = "" );
+					msg <- paste( msg, correctionStart, "'Start Time' to ", cwStart, " and 'End Time' to ", cwEnd, correctionEnd, sep = "" );
+				} else if ( windowStartError )
+				{
+					msg <- paste( msg, "<= ", peaksWindowStart[ length( peaksWindowStart ) ], ".", sep = "" );
+					msg <- paste( msg, correctionStart, "'Start Time' to ", cwEnd, correctionEnd, sep = "" );
+				} else
+				{
+					msg <- paste( msg, ">= ", peaksWindowEnd[ 1 ], ".", sep = "" );
+					msg <- paste( msg, correctionStart, "'End Time' to ", cwEnd, correctionEnd, sep = "" );
+				}
+				
+				userError( msg );
+			}
+			
+			for (i in 1:Nr)
+			{
+				startp<-eval(ps[i]-cw)
+				endp<-eval(ps[i]+cw)
+				
+				refc<-refsig[startp:endp];
+
+				fsc<-nsigJ[startp:endp];
+
+				cf<-ccf(refc,fsc,lag.max=trunc(cw/2), type="correlation", plot=FALSE);
+				mm<-max(cf$acf);
+			    fsj[i,j]<-cf$lag[cf$acf==max(cf$acf)];
+
+			    #if ((fsj[i,j]==trunc(cw/2)) | (fsj[i,j]==-trunc(cw/2))) {fsj[i,j]=0;} 
+		    	msj[i,j]<-mm;
+			}
+ 		}
+	} else {print('WARNING: EMPTY JITTER MATRIX -- all peaks outside allowed correlation window')}
+
+	avshift<-as.vector(rep(0,Nc-1))
+
+	for (jj in 1:(Nc-1))
+	{
+		signjj<-sign(fsj[,jj+1])
+		lneg<-force(length(signjj[signjj<0]))
+		lpos<-force(length(signjj[signjj>0]))
+		lzer<-force(length(signjj[signjj==0]))
+		votesign<-max(c(lneg, lpos, lzer))
+
+		avneg<-sum(fsj[signjj<0,jj+1])
+		if (lneg>0){avneg<-avneg/lneg}
+
+		avpos<-sum(fsj[signjj>0,jj+1])
+		if (lpos>0){avpos<-avpos/lpos}
+
+		avzer=sum(fsj[signjj==0,jj+1])
+		if (lzer>0){avzer<-avzer/lzer}
+
+		avshift[jj]<-avneg*(lneg==votesign)+avpos*(lpos==votesign)+avzer*(lzer==votesign)
+	}
+
+	jitout <- list(pjit=fsj[,], trerr=avshift)
+
+	return(as.list(jitout))
+	#return(as.vector(fsj));
+}
+
+################## Global Alignment Function ##############
+globalAlign<- function(tof,tofList, tofListMetaData, HWFM,noiseThres,startS,endS, Appli, Detect) {
+
+### INPUT:
+### tof - baseline subtracted and smoothed tofList (to detect global shifts)
+### tofList - unprocessed data (to apply detected shifts)
+### tofListMetaData - "offset" and "scale" are used and /or updated
+### HWFM - peak width in the range of pivot detection
+### noiseThres - fraction of maximum signal threshold for pivot detection
+### startS, endS - TOF range (indices) for pivot detection
+### Appli - apply correction to the tofList
+### Detect - auto-detect correction for the data
+
+Nr <- length(tofList)
+spectraName <- names(tofList)
+Nc <- 0
+for(i in 1:Nr) {
+  	len <- length(tof[[i]])
+  	if (len > Nc) {
+    	Nc <- len
+  	}
+}
+
+sigtm <- matrix(0, nrow=Nr, ncol=Nc)
+sigt0 <- sigtm
+
+digitizerDwell <- as.double(tofListMetaData[1,"instrumentSpecificSettings.timeDelta"]) ;
+for (i in 1: Nr) {
+    	sigt <- tof[[i]]
+    	sig0 <- tofList[[i]]
+    	l1 <- length(sigt)
+    	l0 <- length(sig0)
+    	#print(c(l1,l0)) 
+    	sigtm[i, 1:l1] <- sigt;
+    	sigt0[i, 1:l0] <- sig0;
+    	sigtm[i, is.na(sigt)]<-0  ## zero-fill for NA values 06/22, Dasha
+    	sigt0[i, is.na(sig0)]<-0 
+	if ( digitizerDwell != as.double(tofListMetaData[ i, "instrumentSpecificSettings.timeDelta" ]) )
+	{
+		userError( "Spectra do not all have the same digitizer frequency.  Please choose spectra that all have the same experimental settings." );
+	}
+}
+
+if(Detect){
+	sw <- 2 * HWFM
+	if ( sw < 2 )
+	{
+		userError( "The 'Peak Half-Width' must be at least one time tick." );
+	}
+
+	if ( noiseThres <= 0 || noiseThres >= 1 )
+	{
+		userError( "'Threshold Intensity' must be between 0 and 1." );
+	}
+
+	### specify the time range to look for pivot peaks
+
+	### try to transfer the list to a matrix and error out if the length are different
+
+	
+	dataStart<-as.integer(tofListMetaData[1, "timeOfFlightData.start" ]);
+	if ( startS < dataStart )
+	{
+		userError( "'Start Time' must be between 'dataStart' and the longest spectrum length." );
+	}
+
+	if ( endS > Nc )
+	{
+		userError( "'End Time' must be less than the longest spectrum length." );
+	}
+
+	if ( endS <= ( startS + 3 * sw ) )
+	{
+		userError( "The specified time range ('End Time' - 'Start Time') must be greater than 18 peak half-widths in order to contain at least 3 pivot peaks in the reference spectrum." );
+	}
+
+	pivPeaks<- pivPeak(sigtm[1,startS:endS]/max(sigtm[1,startS:endS]), noiseThres, HWFM);
+	pivPeaks <- pivPeaks + startS;
+	print("Found pivot peaks for global alignment:")
+	print(length(pivPeaks))
+	#print(pivPeaks)
+	if ( length( pivPeaks ) < 3 )
+	{
+		userError( "Could not find at least 3 peaks in the reference spectrum." );
+	}
+
+	locJit <-locjitdet(t(sigtm), pivPeaks, sw, startS, endS, names(tofList));
+
+	pj <- locJit$pjit;  ### pj[i,j] shows jitter for peak "i" in signal "j"
+	#print(pj) #debug
+	#pjSlope <- rep(0,dim(pj)[2]); pjIntercept <- pjSlope;
+} else { pivPeaks <- c(1,2)  # no auto-detection is performed
+	pj <-rbind(rep(0,Nr),rep(0,Nr))
+}
+
+	t0 <- 1:Nc ## original time axis
+	sapl <- 0;
+
+	for (j in 2:(dim(pj)[2])){ ## calculate linear fit coefficients for jitter in "j"-th record
+ 		ldf <- length(which(pj[,j]!=0)); lndf <- length(pivPeaks)-ldf; 
+ 		if ( (ldf > 3) & ((ldf-lndf) > 2)) { ## enough data to fit to a line
+			z<-line(pivPeaks, pj[,j]);
+			pjIntercept<-coef(z)[1];
+			pjSlope<-(1.0+coef(z)[2]);
+		} else { pjSlope <- as.numeric(tofListMetaData[ j, "timeOfFlightData.scale" ]); 
+			pjIntercept <- as.numeric(tofListMetaData[ j, "timeOfFlightData.offset" ]);
+		} ## input meta-data values
+		#print(c(pjIntercept, pjSlope))  #debug
+
+		if( Detect & !Appli){
+			tofListMetaData[ j, "timeOfFlightData.offset" ] <- pjIntercept
+			tofListMetaData[ j, "timeOfFlightData.scale" ] <- pjSlope
+		}
+
+		if ( Appli ) { ## apply new time scale
+        		if (pjSlope!=1 | pjIntercept!=0) {
+				tsj<-pjSlope*t0+pjIntercept
+				intrp <- approx(tsj, sigt0[j,], t0)  ## appli to "original" (no BS) spectrum
+				outSpectrum <-as.vector(intrp$y);
+				inputSpectrum <- tofList[[j]]
+				#print(c(length(inputSpectrum),length(outSpectrum))) #debug
+				outSpectrum <- outSpectrum[1:length(inputSpectrum)]
+				outSpectrum[is.na(outSpectrum)] <- inputSpectrum[is.na(outSpectrum)]
+				tofList[spectraName[j]] <- list(outSpectrum)
+        			sapl <- c(sapl,j);
+        		}
+        		tofListMetaData[ j, "timeOfFlightData.offset" ] <- pjIntercept
+			tofListMetaData[ j, "timeOfFlightData.scale" ] <- pjSlope
+        
+		} 
+ 		#print(tofListMetaData[length(tofList), "timeOfFlightData.offset" ])
+	}
+	if (length(sapl)>1){
+		sapl <- sapl[2:length(sapl)]; # spectra with applied global shift 
+		print("####    Pre-aligned spectra:")
+		print(sapl)
+	} else {
+		print("####    None of the spectra needed/required pre-alignment    ####")
+	}
+aOut <- list(tList=tofList, tMeta=tofListMetaData)
+rm(sigtm, sigt0, sigt, sig0)
+return(as.list(aOut))
+}
+
+shiftCorrect <- function(tofList)
+{
+return(tofList); ## noise thresholds depending on filter model <<EDIT
+}
+
+
