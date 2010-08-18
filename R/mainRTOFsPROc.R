@@ -566,6 +566,7 @@ if (!averageOnly){
 			   	cof <- mean(tofList[[k]][osS]) 
     			   	nam <- (sqrt(abs(mbs[iir]-cof)*ns)+ns)*3; # noise amplitude
                            } else { # stationary noise (independent of baseline)
+
     			     	nam<-(filtSig*0+ns)*3;  # noise amplitude  
     			   }
  		}  else if (identical(algo, "matched")) {
@@ -916,7 +917,10 @@ if (!averageOnly){
 }
 
 #######################  End Alignment Block  #############################
+if (exists("alignedPeakList") & exists("alignedPeakListMetaData") & !averageOnly){
+return(list(alignedPeakList=alignedPeakList, alignedPeakListMetaData= alignedPeakListMetaData ))  
+} else {return(savl)}
 
-return(list(alignedPeakList=alignedPeakList, alignedPeakListMetaData= alignedPeakListMetaData ))  # end of main function
-}
+
+} # end of main function 
 

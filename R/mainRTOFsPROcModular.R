@@ -945,6 +945,10 @@ if (exists("alignedPeakList")){
 
 #######################  End Alignment Block  #############################
 
-return(list(alignedPeakList=alignedPeakList, alignedPeakListMetaData= alignedPeakListMetaData ))  # end of main function
-}
+if (exists("alignedPeakList") & exists("alignedPeakListMetaData") & !averageOnly){
+return(list(alignedPeakList=alignedPeakList, alignedPeakListMetaData= alignedPeakListMetaData ))  
+} else {return(savl)}
+
+}  # end of main function
+
 
