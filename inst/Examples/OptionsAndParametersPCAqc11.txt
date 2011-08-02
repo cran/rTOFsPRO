@@ -31,7 +31,7 @@
    
    averageOnly <- FALSE # if TRUE: get only "avreage" spectrum, and do *no processing* for tofList
    monitorMemory <- FALSE # monitor memory usage in compression mode
-   debug <- FALSE # do debugging for provided data-example. NOTE: only used by "main...Modular"
+   dbgmode <- FALSE # do debugging for provided data-example. NOTE: only used by "main...Modular"
    saveOut <- FALSE # save aux-output in "...Test.Rdat" files and remove from workspace
    save4Mlb <- FALSE # save output for Matlab in .mat
 	

@@ -115,7 +115,7 @@ function(OptionsAndParametersFileName) {
 
 Nfiles <-length(rTofFileNames); 
 
-	if (debug){
+	if (dbgmode){
 		Nfiles <- min(Nfiles,2); #debug: change
 	}
 if (Nfiles != length(rTofMetaFileNames)) { 
@@ -127,7 +127,7 @@ for (rdl in 1:Nfiles){  ## For multiple TOF data files (e.g., multiple biprocess
         rTofFileName <- rTofFileNames[rdl]  # reads from "OptionsAndParameters" file
 	rTofMetaFileName <-rTofMetaFileNames[rdl]
 	load(rTofFileName)
-	if (debug) {
+	if (dbgmode) {
 		inputSpecList<-tofList  # original tofList copy1 (for debugging global alignment)
 	}
 	load(rTofMetaFileName)
@@ -139,7 +139,7 @@ print("---------------------------");
 
 	dataStart <- 1 + as.integer(tofListMetaData[1, "timeOfFlightData.start"]);# same for all spectra
 	sampleRate <- as.numeric(tofListMetaData[1, "instrumentSpecificSettings.timeDelta" ]);
-	if (debug) {
+	if (dbgmode) {
 		print("dataStart & sampleRate:")
 		print(c(dataStart, sampleRate))
 	}
@@ -196,7 +196,7 @@ print("---------------------------");
 				tof[[ia]] <- as.vector(smsp)
 			} 
 		}
-		if(debug) {
+		if(dbgmode) {
 			smsp <- circShift(smsp,60) #debug-shift
 			tof[[spectraCount]] <- as.vector(smsp)#debug-shift
 			tofListMetaData[length(tofList), "timeOfFlightData.offset" ] <- 40; #debug-shift
@@ -213,7 +213,7 @@ print("---------------------------");
 		tofListMetaData <- tofListMetaData[2:lenmd,] 
 	} 
 	rm(tof); gc(); ## clean memory
-	if (debug) {
+	if (dbgmode) {
 		print("debug global offset detection")
 		print(tofListMetaData[length(tofList), "timeOfFlightData.offset" ])
 		print(c(sum(inputSpecList[[1]]-tofList[[1]]),sum(inputSpecList[[11]]-tofList[[11]]))) #debug-shift
@@ -235,7 +235,7 @@ print("---------------------------");
         adsp <- 0;
 	spectraName <- names(tofList)
 	spectraCount <- length(tofList)
-	if (debug) { # make a change in offset
+	if (dbgmode) { # make a change in offset
 		tofListMetaData[spectraCount,"instrumentSpecificSettings.timeZero" ] <- zero0 - 300; #debug-shift
 	}
 	for (i in 1:spectraCount){
@@ -243,7 +243,7 @@ print("---------------------------");
 		if(zero!=zero0){
 			delay<-round((zero0-zero)/sampleRate);
 			adsp<-c(adsp,i);
-			if (debug) {
+			if (dbgmode) {
 				print("debug pre-set TD shift")
 				print(c(i,delay)) #debug-shift
 			}
@@ -252,7 +252,7 @@ print("---------------------------");
 			tofList[[spectraName[i]]] <- as.vector(shsp) 
 		}
 	} 
-	if (debug) {
+	if (dbgmode) {
 		print(c(sum(inputSpecList[[1]][1:10]-tofList[[1]][1:10]),sum(inputSpecList[[11]][1:10]-tofList[[11]][1:10]))) #debug-shift
 	}
 	if (length(adsp)>1){
@@ -283,7 +283,7 @@ print("---------------------------");
 		sav <- sav[1:Tav]*Navs+tofList[[1]][1:Tav];
 	}
 
-	if (debug) { 
+	if (dbgmode) { 
 		print("average spectrum BEFORE update: data_set, number_sp, current_spectraCount")
         	print(c(rdl, Navs, spectraCount)) # debug multiple input
 	}
@@ -300,7 +300,7 @@ print("---------------------------");
 	savl[[1]] <- sav; # make into tofList-like strcuture
 	names(savl) <- "average"
 	savbs <- savl
-	if (debug) { 
+	if (dbgmode) { 
 		print("average spectrum AFTER update: data_set, number_sp, current_spectraCount")
         	print(c(rdl, Navs, spectraCount)) # debug multiple input
 	}
@@ -335,7 +335,7 @@ tof <- tofList # initialize bs-list
 
 	 	tof <- ExpBkgr_call(tofList, bsS,osS,mCH, dataStart)
 		savbs <- ExpBkgr_call(savl, bsS,osS,mCH, dataStart)
-		if (debug) {
+		if (dbgmode) {
 			spi11<-inputSpecList[[11]]; spb11<-tof[[11]]; spg11<-tofList[[11]] #debug-shift
 			print("debug shift: offset_input, offset_bs, offset_tofList:")
 			print(c(mean(spi11[osS]),mean(spb11[osS]),mean(spg11[osS]) )) #debug-shift
@@ -638,7 +638,7 @@ rm(filtSig, mbs, nam,srs, ns,iir, msrec, inputSpectrum, rsav, nsav); gc();
 
 	## remove large tofList data from memory
 	rm(tofList, tofResampled, tof, naml) ## 
-	if (debug) { rm(inputSpecList) }
+	if (dbgmode) { rm(inputSpecList) }
 	gc()
 	if (monitorMemory){
 		memoryUsedAfterCleanUp<-memory.size(max=FALSE)
@@ -660,7 +660,7 @@ spectraCount <- length(spectraName)  # all spectra from multiple files
 
 rm(masterNaml, masterRTOFl, masterMeta, sav); gc(); # clean-up memory from "master"-lists
 
-	if (debug) { 
+	if (dbgmode) { 
 		print("after multiple loads: length(tofResampled), spectraCounts:")
 		print(c(length(tofResampled), spectraCount))
 	}
@@ -757,7 +757,7 @@ if (nsdepBS) { print("# Baseline-dependent noise threshold used for peak detecti
 
 ### If peak picking is not performed, processing is terminated
 
-	if (debug & exists("peakL")){
+	if (dbgmode & exists("peakL")){
 		print("After peak detection: length(peakL), spectraCount, noPL")
 		print(c(length(peakL),spectraCount, noPL))
 	}
@@ -829,7 +829,7 @@ if (exists("peakL") & length(peakL)==spectraCount) {
 		# NOTE: choose "DS" domain to generate and save when training
 			load(aplTrainFileName) # .Rdat file name containing "aplTrain" object
 
-			if (debug & exists("aplTrain")){
+			if (dbgmode & exists("aplTrain")){
 				print("training aligned peaks loaded:")
 				print(aplTrain$peaks)
 			}
@@ -838,7 +838,7 @@ if (exists("peakL") & length(peakL)==spectraCount) {
 			peaksav<-peakLav[[1]]$Positions # peak positions from average spectrum
 		}
 
-		if (debug & exists("peaksav")){
+		if (dbgmode & exists("peaksav")){
 			print("average spectrum peak positions used for alignment:")
 			print(peaksav)
 		}
@@ -872,7 +872,7 @@ if (exists("peakL") & length(peakL)==spectraCount) {
 		print("Alignment Method: none")
 		
 	} # end alignment options
-	if (debug & exists("alignedPeakList")){
+	if (dbgmode & exists("alignedPeakList")){
 		print("after alignment: length of aligned peak list:")
 		print(length(alignedPeakList$data))
 	}
@@ -889,7 +889,7 @@ if (exists("alignedPeakList")){
 	}
 	rm(rrr,pks,dmp); gc();
 ## Convert aligned peak positions to original time
-	if (debug){
+	if (dbgmode){
 		print("aligned peaks:")
 		print(alignedPeakList$peaks)
 	}
